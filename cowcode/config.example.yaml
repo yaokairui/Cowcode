@@ -1,0 +1,13 @@
+# Cowcode configuration template
+# Copy this file to config.yaml for local use.
+# Do not commit config.yaml if it contains a real API key.
+
+providers:
+  - name: "Agnes AI"
+    protocol: openai
+    model: agnes-2.0-flash
+    base_url: https://apihub.agnes-ai.com/v1
+    api_key: env:AGNES_API_KEY
+
+# Optional: custom system prompt (leave empty for default)
+system_prompt: ""

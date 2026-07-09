@@ -1,0 +1,30 @@
+# Local secrets
+cowcode/config.yaml
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
