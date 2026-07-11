@@ -14,10 +14,11 @@ from cowcode.agent import (
     NOTICE_MAX_ITER,
     NOTICE_UNKNOWN_TOOLS,
     Agent,
-    Mode,
     Phase,
 )
-from cowcode.prompt import PLAN_MODE_REMINDER
+from cowcode.permission import Mode
+from cowcode.prompt import plan_reminder
+from cowcode.provider import Request
 from cowcode.session import Session, StreamEvent, ToolCall, Usage
 from cowcode.tool import Registry, Result
 
@@ -67,15 +68,13 @@ class FakeProvider:
         self.scripts = scripts
         self.call_idx = 0
         self.record_streams = record_streams
-        self.captured_defs: list[list] = []
-        self.captured_suffixes: list[str] = []
+        self.captured_requests: list[Request] = []
 
-    async def stream(
-        self,
-        session: Session,
-        tools: list | None = None,
-        system_suffix: str = "",
-    ) -> AsyncIterator[StreamEvent]:
+    @property
+    def model(self) -> str:
+        return "fake-model"
+
+    async def stream(self, request: Request) -> AsyncIterator[StreamEvent]:
         if self.call_idx >= len(self.scripts):
             # 脚本耗尽：返回纯文本终止
             yield StreamEvent(text="Done.")
@@ -83,10 +82,7 @@ class FakeProvider:
             return
         script = self.scripts[self.call_idx]
         if self.record_streams:
-            self.captured_defs.append(
-                [(t.name if hasattr(t, "name") else str(t)) for t in (tools or [])]
-            )
-            self.captured_suffixes.append(system_suffix)
+            self.captured_requests.append(request)
         for ev in script:
             yield ev
         self.call_idx += 1
@@ -117,7 +113,11 @@ async def test_text_is_yielded_before_provider_stream_completes() -> None:
     stream_finished = asyncio.Event()
 
     class GatedProvider:
-        async def stream(self, session, tools=None, system_suffix=""):
+        @property
+        def model(self):
+            return "fake-model"
+
+        async def stream(self, request):
             try:
                 yield StreamEvent(text="Hello")
                 await release_stream.wait()
@@ -130,7 +130,7 @@ async def test_text_is_yielded_before_provider_stream_completes() -> None:
     session = Session()
     session.append("user", "say hello")
     stream = Agent(GatedProvider(), Registry()).run(
-        session, Mode.NORMAL, asyncio.Event()
+        session, Mode.DEFAULT, asyncio.Event()
     )
 
     iteration = await anext(stream)
@@ -145,7 +145,9 @@ async def test_text_is_yielded_before_provider_stream_completes() -> None:
     remaining = [event async for event in stream]
 
     assert any(event.text == " world" for event in remaining)
-    assert any(event.usage == Usage(input_tokens=12, output_tokens=5) for event in remaining)
+    assert any(
+        event.usage == Usage(input_tokens=12, output_tokens=5) for event in remaining
+    )
     assert remaining[-1].done
     assert stream_finished.is_set()
     assert session.messages[-1].content == "Hello world"
@@ -165,9 +167,7 @@ async def test_tool_start_is_yielded_before_execution_completes() -> None:
         return Result("finished")
 
     registry = Registry()
-    registry.register(
-        FakeTool("read_file", read_only=True, execute_fn=gated_execute)
-    )
+    registry.register(FakeTool("read_file", read_only=True, execute_fn=gated_execute))
     provider = FakeProvider(
         scripts=[
             [_tool_call("read_file", call_id="read-1"), _done()],
@@ -176,7 +176,7 @@ async def test_tool_start_is_yielded_before_execution_completes() -> None:
     )
     session = Session()
     session.append("user", "read")
-    stream = Agent(provider, registry).run(session, Mode.NORMAL, asyncio.Event())
+    stream = Agent(provider, registry).run(session, Mode.DEFAULT, asyncio.Event())
 
     assert (await anext(stream)).iter == 1
     start = await asyncio.wait_for(anext(stream), timeout=0.5)
@@ -231,7 +231,7 @@ async def test_multi_turn_loop() -> None:
     events = [
         ev
         async for ev in Agent(provider, registry).run(
-            session, Mode.NORMAL, asyncio.Event()
+            session, Mode.DEFAULT, asyncio.Event()
         )
     ]
 
@@ -283,7 +283,7 @@ async def test_max_iterations() -> None:
     events = [
         ev
         async for ev in Agent(provider, registry).run(
-            session, Mode.NORMAL, asyncio.Event()
+            session, Mode.DEFAULT, asyncio.Event()
         )
     ]
 
@@ -323,7 +323,7 @@ async def test_unknown_tools_stop() -> None:
     events = [
         ev
         async for ev in Agent(provider, registry).run(
-            session, Mode.NORMAL, asyncio.Event()
+            session, Mode.DEFAULT, asyncio.Event()
         )
     ]
 
@@ -360,7 +360,7 @@ async def test_unknown_tools_reset_on_mixed() -> None:
     events = [
         ev
         async for ev in Agent(provider, registry).run(
-            session, Mode.NORMAL, asyncio.Event()
+            session, Mode.DEFAULT, asyncio.Event()
         )
     ]
 
@@ -443,7 +443,7 @@ async def test_concurrent_batch_ordering() -> None:
     _events = [
         ev
         async for ev in Agent(provider, registry).run(
-            session, Mode.NORMAL, asyncio.Event()
+            session, Mode.DEFAULT, asyncio.Event()
         )
     ]
 
@@ -508,7 +508,7 @@ async def test_cancel_history_consistency() -> None:
     async def run_and_cancel():
         events = []
         agent = Agent(provider, registry)
-        async for ev in agent.run(session, Mode.NORMAL, cancel):
+        async for ev in agent.run(session, Mode.DEFAULT, cancel):
             events.append(ev)
             # 一旦工具开始执行（START 事件出现）就取消
             if ev.tool is not None and ev.tool.phase == Phase.START:
@@ -531,7 +531,7 @@ async def test_cancel_history_consistency() -> None:
     events2 = [
         ev
         async for ev in Agent(provider2, registry).run(
-            session, Mode.NORMAL, asyncio.Event()
+            session, Mode.DEFAULT, asyncio.Event()
         )
     ]
     assert events2[-1].done
@@ -567,14 +567,75 @@ async def test_plan_mode_restricts_tools() -> None:
         )
     ]
 
-    assert provider.captured_defs
-    tool_names = provider.captured_defs[0]
-    # 仅含只读
+    assert provider.captured_requests
+    request = provider.captured_requests[0]
+    tool_names = [tool.name for tool in request.tools]
     assert set(tool_names) == {"read_file", "glob", "grep"}
-    # system_suffix 含 PLAN_MODE_REMINDER
-    assert provider.captured_suffixes
-    assert provider.captured_suffixes[0] == PLAN_MODE_REMINDER
+    assert request.reminder == plan_reminder(True)
     assert events[-1].done
+
+
+@pytest.mark.asyncio
+async def test_plan_reminder_cadence_and_cache_usage_passthrough() -> None:
+    """规划提醒首轮/第 5 轮完整，其余精简；缓存用量原样透传。"""
+    registry = Registry()
+    registry.register(FakeTool("read_file", read_only=True))
+    scripts = [
+        [
+            _tool_call("read_file", call_id=f"read-{index}"),
+            _usage(index, index + 1),
+            _done(),
+        ]
+        for index in range(1, 6)
+    ]
+    scripts.append(
+        [
+            _text("plan complete"),
+            StreamEvent(
+                usage=Usage(
+                    input_tokens=10,
+                    output_tokens=4,
+                    cache_write=8,
+                    cache_read=6,
+                )
+            ),
+            _done(),
+        ]
+    )
+    provider = FakeProvider(scripts=scripts, record_streams=True)
+    session = Session()
+    session.append("user", "make a multi-step plan")
+
+    events = [
+        event
+        async for event in Agent(
+            provider,
+            registry,
+            system_prompt="stable",
+            environment="environment",
+        ).run(session, Mode.PLAN, asyncio.Event())
+    ]
+
+    reminders = [request.reminder for request in provider.captured_requests]
+    assert reminders[:5] == [
+        plan_reminder(True),
+        plan_reminder(False),
+        plan_reminder(False),
+        plan_reminder(False),
+        plan_reminder(True),
+    ]
+    assert all(
+        request.system.stable == "stable" for request in provider.captured_requests
+    )
+    assert all(
+        request.system.environment == "environment"
+        for request in provider.captured_requests
+    )
+    assert not any(
+        "<system-reminder>" in message.content for message in session.messages
+    )
+    usages = [event.usage for event in events if event.usage is not None]
+    assert usages[-1] == Usage(10, 4, cache_write=8, cache_read=6)
 
 
 # ============================================================
@@ -588,7 +649,7 @@ async def test_stream_error_recovery() -> None:
     registry.register(tool)
 
     class ErrorProvider(FakeProvider):
-        async def stream(self, session, tools=None, system_suffix=""):
+        async def stream(self, request):
             yield StreamEvent(text="starting...")
             raise RuntimeError("connection lost")
 
@@ -600,7 +661,7 @@ async def test_stream_error_recovery() -> None:
     events = [
         ev
         async for ev in Agent(provider, registry).run(
-            session, Mode.NORMAL, asyncio.Event()
+            session, Mode.DEFAULT, asyncio.Event()
         )
     ]
 
@@ -608,3 +669,76 @@ async def test_stream_error_recovery() -> None:
     assert err_events
     # 可继续对话
     assert session.last_role() == "assistant"
+
+
+# ============================================================
+# 场景：AskUserQuestion 拦截（plan mode clarification）
+# ============================================================
+@pytest.mark.asyncio
+async def test_ask_user_question_yields_event_and_stops_loop() -> None:
+    """Agent 收到 AskUserQuestion 后 yield ask_user 事件并停止本轮。"""
+    registry = Registry()
+    registry.register(FakeTool("read_file", read_only=True))
+    registry.register(FakeTool("AskUserQuestion", read_only=True))
+
+    provider = FakeProvider(
+        scripts=[
+            [
+                _text("Let me ask something..."),
+                _tool_call(
+                    "AskUserQuestion",
+                    input_str=json.dumps(
+                        {
+                            "question": "What tech stack do you prefer?",
+                            "options": ["React", "Vue", "Svelte"],
+                        }
+                    ),
+                    call_id="ask-1",
+                ),
+                _done(),
+            ],
+            [_text("Got it, here is the plan."), _done()],
+        ]
+    )
+
+    session = Session()
+    session.append("user", "build a dashboard")
+
+    events = [
+        ev
+        async for ev in Agent(provider, registry).run(
+            session, Mode.PLAN, asyncio.Event()
+        )
+    ]
+
+    ask_events = [ev for ev in events if ev.ask_user is not None]
+    assert len(ask_events) == 1
+    ask = ask_events[0].ask_user
+    assert ask is not None
+    assert "tech stack" in ask.question
+    assert ask.options == ["React", "Vue", "Svelte"]
+    assert ask.tool_call_id == "ask-1"
+
+    # 不应有 done=True —— loop 暂停而非完成
+    done_events = [ev for ev in events if ev.done]
+    assert len(done_events) == 0
+
+    # Session 中 assistant tool_call 与 tool result 配对合法
+    roles = [msg.role for msg in session.messages]
+    assert "tool" in roles
+    assert session.last_role() == "tool"
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_includes_ask_user_question() -> None:
+    """PLAN mode read_only_definitions 包含 AskUserQuestion。"""
+    registry = Registry()
+    registry.register(FakeTool("read_file", read_only=True))
+    registry.register(FakeTool("AskUserQuestion", read_only=True))
+    registry.register(FakeTool("bash", read_only=False))
+
+    definitions = registry.read_only_definitions()
+    names = {d.name for d in definitions}
+    assert "AskUserQuestion" in names
+    assert "read_file" in names
+    assert "bash" not in names

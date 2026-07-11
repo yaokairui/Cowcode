@@ -17,9 +17,10 @@ from textual.widgets import Footer, OptionList, RichLog, Static, TextArea
 from textual.widgets._option_list import Option
 
 from cowcode import __version__
-from cowcode.agent import Agent, AskUserEvent, Mode, Phase
+from cowcode.agent import Agent, ApprovalRequest, AskUserEvent, Phase
 from cowcode.config import Config, ConfigError, ProviderConfig, load_configs
 from cowcode.environment import gather_environment
+from cowcode.permission import Engine, Mode, Outcome, new_engine
 from cowcode.prompt import EXECUTE_DIRECTIVE, build_system_prompt
 from cowcode.provider import Provider, create_provider
 from cowcode.session import Session
@@ -204,6 +205,7 @@ class CowcodeApp(App[Any]):
         Binding("escape", "cancel_or_quit", "Cancel/Quit"),
         Binding("ctrl+c", "cancel_or_quit", "Cancel/Quit"),
         Binding("ctrl+t", "toggle_context", "Context"),
+        Binding("shift+tab", "cycle_mode", "Mode"),
     ]
 
     CSS = """
@@ -268,11 +270,13 @@ class CowcodeApp(App[Any]):
         providers: list[ProviderConfig],
         config: Config,
         registry: Registry | None = None,
+        engine: Engine | None = None,
     ) -> None:
         super().__init__()
         self._providers = providers
         self._config = config
         self._tool_registry = registry or new_default_registry()
+        self._engine = engine
         self._selected_provider: ProviderConfig | None = None
         self._provider: Provider | None = None
         self._session: Session | None = None
@@ -287,17 +291,19 @@ class CowcodeApp(App[Any]):
         self._context_header: ContextHeader
         self._streaming_response: Static
 
-        # ch04 新增字段
-        self._mode: Mode = Mode.NORMAL
+        # 权限模式与待批准状态
+        self._mode: Mode = engine.start_mode() if engine else Mode.DEFAULT
         self._iter: int = 0
         self._usage_in: int = 0
         self._usage_out: int = 0
         self._cur_tools: list[ToolDisplay] = []
         self._turn_cancel: asyncio.Event | None = None
+        self._pending_approval: ApprovalRequest | None = None
+        self._approve_cursor: int = 0
 
         # 交互式澄清状态
         self._pending_question: AskUserEvent | None = None
-        self._ask_user_mode: Mode = Mode.NORMAL
+        self._ask_user_mode: Mode = Mode.DEFAULT
 
     def compose(self) -> ComposeResult:
         yield Static(CAT_BANNER, id="banner")
@@ -337,17 +343,44 @@ class CowcodeApp(App[Any]):
         self._context_header.toggle_context()
 
     def action_cancel_or_quit(self) -> None:
-        """Esc/Ctrl+C：流式态取消本轮；空闲态退出。"""
+        """Esc/Ctrl+C：流式态/待批准态取消本轮；空闲态退出。"""
         if self._is_streaming and self._turn_cancel is not None:
             self._turn_cancel.set()
+        elif self._pending_approval is not None:
+            # 待批准态取消：兜底送 DENY_ONCE 解阻塞
+            if not self._pending_approval.respond.done():
+                self._pending_approval.respond.set_result(Outcome.DENY_ONCE)
+            self._pending_approval = None
         else:
             self.exit()
+
+    def action_cycle_mode(self) -> None:
+        """Shift+Tab：循环切换权限模式（仅空闲态生效）。"""
+        if self._is_streaming or self._pending_approval is not None:
+            return
+        from cowcode.permission import next_mode
+
+        self._mode = next_mode(self._mode)
+        mode_names = {
+            Mode.DEFAULT: "DEFAULT",
+            Mode.ACCEPT_EDITS: "ACCEPT EDITS",
+            Mode.PLAN: "PLAN",
+            Mode.BYPASS: "BYPASS",
+        }
+        self._conversation.write("")
+        self._conversation.write(
+            Text(
+                f"已切换到 {mode_names.get(self._mode, str(self._mode))} 模式",
+                style="italic",
+            )
+        )
+        self._update_status_bar()
 
     def _select_provider(self, provider_config: ProviderConfig) -> None:
         self._selected_provider = provider_config
         self._session = Session()
         self._provider = create_provider(provider_config)
-        self._mode = Mode.NORMAL
+        self._mode = self._engine.start_mode() if self._engine else Mode.DEFAULT
         self._update_status_bar()
         self._input.focus()
 
@@ -359,9 +392,21 @@ class CowcodeApp(App[Any]):
     def _update_status_bar(self) -> None:
         if self._selected_provider is None:
             return
-        parts = [self._selected_provider.name]
-        if self._mode == Mode.PLAN:
-            parts.append("[bold yellow]PLAN[/]")
+        mode_colors = {
+            Mode.DEFAULT: "green",
+            Mode.ACCEPT_EDITS: "yellow",
+            Mode.PLAN: "bold yellow",
+            Mode.BYPASS: "red",
+        }
+        mode_labels = {
+            Mode.DEFAULT: "DEFAULT",
+            Mode.ACCEPT_EDITS: "ACCEPT EDITS",
+            Mode.PLAN: "PLAN",
+            Mode.BYPASS: "BYPASS",
+        }
+        color = mode_colors.get(self._mode, "")
+        label = mode_labels.get(self._mode, str(self._mode))
+        parts = [f"[{color}]{label}[/]"]
         parts.append("|")
         parts.append(self._selected_provider.model)
         if self._usage_in or self._usage_out:
@@ -502,6 +547,26 @@ class CowcodeApp(App[Any]):
         self._print_notice("继续…")
         self._start_agent_run(self._ask_user_mode)
 
+    def _on_approval_answer(self, answer: str | None) -> None:
+        """权限审批弹窗回调——把用户选择转成 Outcome 并恢复 Agent。"""
+        if answer is None or self._pending_approval is None:
+            if self._pending_approval is not None and not self._pending_approval.respond.done():
+                self._pending_approval.respond.set_result(Outcome.DENY_ONCE)
+            self._pending_approval = None
+            return
+        pending = self._pending_approval
+        self._pending_approval = None
+        # answer 格式为 "1. 允许本次" 等 —— 按序号判定
+        if answer.startswith("2"):
+            outcome = Outcome.ALLOW_FOREVER
+        elif answer.startswith("3"):
+            outcome = Outcome.DENY_ONCE
+        else:
+            outcome = Outcome.ALLOW_ONCE
+        if not pending.respond.done():
+            pending.respond.set_result(outcome)
+        self._start_agent_run(self._ask_user_mode)
+
     def _start_agent_run(self, mode: Mode) -> None:
         """启动 Agent Loop 并消费事件流。"""
         if self._session is None or self._provider is None:
@@ -523,6 +588,7 @@ class CowcodeApp(App[Any]):
             self._tool_registry,
             system_prompt=build_system_prompt(self._config.system_prompt),
             environment=environment,
+            engine=self._engine,
         )
         self.run_worker(self._consume_agent_events(agent, mode), exclusive=True)
 
@@ -571,6 +637,24 @@ class CowcodeApp(App[Any]):
                 if event.notice:
                     self._print_notice(event.notice)
                 if event.done:
+                    break
+                if event.approval is not None:
+                    # 权限 Ask——人在回路审批弹窗
+                    self._pending_approval = event.approval
+                    self._approve_cursor = 0
+                    self._ask_user_mode = mode
+                    options = [
+                        "1. 允许本次",
+                        "2. 永久允许（写入本地配置）",
+                        "3. 拒绝本次",
+                    ]
+                    self.push_screen(
+                        AskUserQuestionScreen(
+                            f"{event.approval.name}({event.approval.args})\n{event.approval.reason}",
+                            options,
+                        ),
+                        callback=self._on_approval_answer,
+                    )
                     break
                 if event.ask_user is not None:
                     # 弹窗让用户选择或自定义输入
@@ -625,8 +709,16 @@ def main() -> None:
         print(f"Error: Invalid config: {exc}")
         raise SystemExit(1)
 
+    import sys
+
+    root = str(Path.cwd().resolve())
+    engine, err = new_engine(root)
+    if err is not None:
+        print("权限引擎降级:", err, file=sys.stderr)
+
     CowcodeApp(
         providers=providers,
         config=config,
         registry=new_default_registry(),
+        engine=engine,
     ).run()

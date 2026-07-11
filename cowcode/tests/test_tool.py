@@ -19,6 +19,7 @@ async def test_registry_definitions_are_ordered() -> None:
         "bash",
         "glob",
         "grep",
+        "AskUserQuestion",
     ]
     assert registry.get("read_file") is not None
     assert registry.get("missing") is None

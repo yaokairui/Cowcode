@@ -5,21 +5,13 @@ from __future__ import annotations
 import asyncio
 import json as _json
 from dataclasses import dataclass, field
-from enum import IntEnum
 from typing import AsyncIterator
 
+from cowcode.permission import Decision, Engine, Mode, Outcome
 from cowcode.prompt import PLAN_REMINDER_INTERVAL, plan_reminder
 from cowcode.provider import Provider, Request, SystemPrompt
 from cowcode.session import Session, ToolCall, ToolDefinition, ToolResult, Usage
 from cowcode.tool import DEFAULT_TIMEOUT, Registry, truncate_text
-
-# ----- 枚举 -----
-
-
-class Mode(IntEnum):
-    NORMAL = 0
-    PLAN = 1
-
 
 # ----- 常量 -----
 MAX_ITERATIONS: int = 25
@@ -45,6 +37,7 @@ class Event:
     done: bool = False
     err: Exception | None = None
     ask_user: "AskUserEvent | None" = None
+    approval: "ApprovalRequest | None" = None
 
 
 @dataclass
@@ -54,6 +47,16 @@ class AskUserEvent:
     question: str
     options: list[str] = field(default_factory=list)
     tool_call_id: str = ""
+
+
+@dataclass
+class ApprovalRequest:
+    """权限引擎判定为 Ask，Agent 暂停等待用户在回路批准。"""
+
+    name: str
+    args: str
+    reason: str
+    respond: asyncio.Future[Outcome] = field(default_factory=lambda: asyncio.Future())
 
 
 class Phase:
@@ -103,16 +106,18 @@ class Agent:
         registry: Registry,
         system_prompt: str = "",
         environment: str = "",
+        engine: Engine | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
         self._system_prompt = system_prompt
         self._environment = environment
+        self._engine = engine
 
     async def run(
         self,
         session: Session,
-        mode: Mode = Mode.NORMAL,
+        mode: Mode = Mode.DEFAULT,
         cancel: asyncio.Event | None = None,
     ) -> AsyncIterator[Event]:
         """执行 Agent Loop，yield Event 供 TUI 消费。"""
@@ -182,7 +187,7 @@ class Agent:
 
             # 保序分批执行
             execution_state = _ExecutionState()
-            async for event in self._execute_batched(calls, cancel, execution_state):
+            async for event in self._execute_batched(calls, mode, cancel, execution_state):
                 yield event
 
             session.add_tool_results(execution_state.results)
@@ -255,15 +260,17 @@ class Agent:
     async def _execute_batched(
         self,
         calls: list[ToolCall],
+        mode: Mode,
         cancel: asyncio.Event,
         state: _ExecutionState,
     ) -> AsyncIterator[Event]:
-        """保序分批并发执行工具；START/END 事件实时转发。
+        """保序分批并发执行工具；权限检查接入五层流水线。
 
-        AskUserQuestion 被特殊拦截：发出 ask_user 事件、写入等待结果后，
-        本轮循环终止，由 CLI 收集用户回答后重新启动 Agent。
+        AskUserQuestion 被特殊拦截；Read 工具先 engine.check 再并发；
+        Write/Exec 工具先 engine.check，Ask 时走人在回路审批。
         """
         results: list[ToolResult | None] = [None] * len(calls)
+        engine = self._engine
 
         i = 0
         while i < len(calls):
@@ -319,7 +326,19 @@ class Agent:
                 j += 1
 
             if j > i:
-                # 并发批 [i, j)
+                # 并发批 [i, j) -- 只读工具
+                # ① 权限检查每个 call，DENY 预填结果不纳入 gather
+                deny_indices: set[int] = set()
+                for k in range(i, j):
+                    if engine is not None:
+                        decision, reason = engine.check(mode, calls[k], True)
+                        if decision == Decision.DENY:
+                            results[k] = ToolResult(
+                                tool_call_id=calls[k].id,
+                                content=reason,
+                                is_error=True,
+                            )
+                            deny_indices.add(k)
                 for k in range(i, j):
                     yield Event(
                         tool=ToolEvent(
@@ -333,7 +352,14 @@ class Agent:
                     state.results = self._coalesce_results(results)
                     state.completed = False
                     return
-                await self._run_concurrent_batch(calls, i, j, results, cancel)
+                # 只 run 未被 deny 的
+                gather_indices = [k for k in range(i, j) if k not in deny_indices]
+                if gather_indices:
+
+                    async def _gather_one(k: int) -> None:
+                        results[k] = await self._run_one(calls[k])
+
+                    await asyncio.gather(*(_gather_one(k) for k in gather_indices))
                 for k in range(i, j):
                     result = results[k]
                     if result is None:
@@ -354,13 +380,107 @@ class Agent:
                     )
                 i = j
             else:
-                # 串行执行单个
+                # 串行执行单个 —— Write/Exec 工具
                 call = calls[i]
+                outcome = Outcome.ALLOW_ONCE  # default: allow if no engine
+                decision = Decision.ALLOW
+                reason = ""
+                if engine is not None:
+                    decision, reason = engine.check(mode, call, False)
+
+                if decision == Decision.DENY:
+                    results[i] = ToolResult(
+                        tool_call_id=call.id, content=reason, is_error=True
+                    )
+                    yield Event(
+                        tool=ToolEvent(
+                            name=call.name,
+                            args=self._args_preview(call.input or "{}"),
+                            phase=Phase.START,
+                        )
+                    )
+                    yield Event(
+                        tool=ToolEvent(
+                            name=call.name,
+                            args=self._args_preview(call.input or "{}"),
+                            phase=Phase.END,
+                            result=results[i].content,
+                            is_error=True,
+                        )
+                    )
+                    i += 1
+                    continue
+
+                if decision == Decision.ASK:
+                    yield Event(
+                        tool=ToolEvent(
+                            name=call.name,
+                            args=self._args_preview(call.input or "{}"),
+                            phase=Phase.START,
+                        )
+                    )
+                    respond: asyncio.Future[Outcome] = asyncio.Future()
+                    yield Event(
+                        approval=ApprovalRequest(
+                            name=call.name,
+                            args=self._args_preview(call.input or "{}"),
+                            reason=reason,
+                            respond=respond,
+                        )
+                    )
+                    try:
+                        outcome = await respond
+                    except asyncio.CancelledError:
+                        results[i] = ToolResult(
+                            tool_call_id=call.id,
+                            content=NOTICE_CANCELLED,
+                            is_error=True,
+                        )
+                        yield Event(
+                            tool=ToolEvent(
+                                name=call.name,
+                                args=self._args_preview(call.input or "{}"),
+                                phase=Phase.END,
+                                result=results[i].content,
+                                is_error=True,
+                            )
+                        )
+                        state.results = self._coalesce_results(results)
+                        state.completed = False
+                        return
+
+                    if outcome == Outcome.DENY_ONCE:
+                        results[i] = ToolResult(
+                            tool_call_id=call.id,
+                            content=f"用户拒绝了执行：{call.name}",
+                            is_error=True,
+                        )
+                        yield Event(
+                            tool=ToolEvent(
+                                name=call.name,
+                                args=self._args_preview(call.input or "{}"),
+                                phase=Phase.END,
+                                result=results[i].content,
+                                is_error=True,
+                            )
+                        )
+                        i += 1
+                        continue
+
+                    if outcome == Outcome.ALLOW_FOREVER and engine is not None:
+                        try:
+                            from cowcode.permission import persist_local_allow
+
+                            persist_local_allow(engine, call)
+                        except Exception:
+                            pass  # 写规则失败不阻断执行
+
+                # 执行（ALLOW / ALLOW_ONCE / ALLOW_FOREVER）
                 yield Event(
                     tool=ToolEvent(
                         name=call.name,
                         args=self._args_preview(call.input or "{}"),
-                        phase=Phase.START,
+                        phase=Phase.START if decision != Decision.ASK else Phase.END,
                     )
                 )
                 if cancel.is_set():
@@ -368,6 +488,9 @@ class Agent:
                     state.results = self._coalesce_results(results)
                     state.completed = False
                     return
+                if decision != Decision.ASK:
+                    # START 还没发 — 补发
+                    pass  # START 已在上方发出
                 results[i] = await self._run_one(call)
                 yield Event(
                     tool=ToolEvent(
