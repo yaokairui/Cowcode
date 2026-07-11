@@ -76,7 +76,9 @@ def load(path: str = "config.yaml") -> Config:
 
     providers_raw = raw.get("providers", [])
     if not isinstance(providers_raw, list) or not providers_raw:
-        raise ConfigError("No providers configured. Add at least one 'providers' entry.")
+        raise ConfigError(
+            "No providers configured. Add at least one 'providers' entry."
+        )
 
     provider_configs: list[ProviderConfig] = []
     for index, provider_raw in enumerate(providers_raw):

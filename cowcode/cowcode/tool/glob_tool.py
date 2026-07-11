@@ -10,6 +10,10 @@ from cowcode.tool import Result
 
 
 class GlobTool:
+    @property
+    def read_only(self) -> bool:
+        return True
+
     def name(self) -> str:
         return "glob"
 

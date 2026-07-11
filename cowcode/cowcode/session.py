@@ -12,7 +12,20 @@ __all__ = [
     "ToolCall",
     "ToolDefinition",
     "ToolResult",
+    "Usage",
 ]
+
+
+@dataclass
+class Usage:
+    """一轮请求的 token 用量（输入/输出 token 数）。"""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_write: int = 0
+    cache_read: int = 0
+    cache_write: int = 0
+    cache_read: int = 0
 
 
 @dataclass
@@ -44,11 +57,16 @@ class ToolDefinition:
 
 @dataclass
 class StreamEvent:
-    """Provider 流式事件：文本增量、工具调用或完成标记。"""
+    """Provider 流式事件：文本增量、工具调用、token 用量或完成标记。
+
+    usage 非空：本轮 token 用量，done 之前一次性发出。
+    """
 
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
+    usage: Usage | None = None
     done: bool = False
+    err: Exception | None = None
 
 
 @dataclass
@@ -87,6 +105,10 @@ class Session:
         """Add the system prompt as the first message."""
         if text and self.is_empty:
             self.append("system", text)
+
+    def last_role(self) -> str:
+        """返回最后一条消息的 role；空历史返回空字符串。"""
+        return self._messages[-1].role if self._messages else ""
 
     def get_history(self) -> list[Message]:
         """Return a shallow copy of the message history."""

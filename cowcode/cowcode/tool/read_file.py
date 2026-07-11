@@ -9,6 +9,10 @@ from cowcode.tool import Result, truncate_text
 
 
 class ReadFileTool:
+    @property
+    def read_only(self) -> bool:
+        return True
+
     def name(self) -> str:
         return "read_file"
 

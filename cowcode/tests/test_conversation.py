@@ -1,6 +1,9 @@
+"""ch04 Conversation 单测——含 last_role 场景。"""
+
 from __future__ import annotations
 
 from cowcode.conversation import Conversation
+from cowcode.session import Session
 
 
 def test_conversation_preserves_message_order_and_returns_copy() -> None:
@@ -17,3 +20,24 @@ def test_conversation_preserves_message_order_and_returns_copy() -> None:
 
     messages.append(messages[0])
     assert len(conversation) == 2
+
+
+def test_session_last_role() -> None:
+    """空历史 + 各角色填充后的 last_role 断言。"""
+    session = Session()
+    assert session.last_role() == ""
+
+    session.append("user", "hello")
+    assert session.last_role() == "user"
+
+    session.append("assistant", "hi there")
+    assert session.last_role() == "assistant"
+
+    # 模拟 tool results 回合
+    from cowcode.session import ToolResult
+
+    session.add_tool_results([ToolResult(tool_call_id="c1", content="result")])
+    assert session.last_role() == "tool"
+
+    session.append("assistant", "final answer")
+    assert session.last_role() == "assistant"

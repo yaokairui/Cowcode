@@ -38,6 +38,11 @@ class Tool(Protocol):
 
     def parameters(self) -> dict[str, Any]: ...
 
+    @property
+    def read_only(self) -> bool:
+        """True=只读工具，可并发执行 & Plan Mode 放行。"""
+        ...
+
     async def execute(self, args: str) -> Result: ...
 
 
@@ -66,6 +71,23 @@ class Registry:
             )
             for name in self._order
         ]
+
+    def read_only_definitions(self) -> list[ToolDefinition]:
+        """Plan Mode：仅导出 read_only==True 的工具定义，保留注册顺序。"""
+        return [
+            ToolDefinition(
+                name=name,
+                description=self._tools[name].description(),
+                input_schema=self._tools[name].parameters(),
+            )
+            for name in self._order
+            if self._tools[name].read_only is True
+        ]
+
+    def is_read_only(self, name: str) -> bool:
+        """分批判定工具是否为只读；未知工具返回 False。"""
+        t = self.get(name)
+        return t is not None and t.read_only
 
     async def execute(
         self, name: str, args: str, timeout: float = DEFAULT_TIMEOUT

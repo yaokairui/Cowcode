@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 from typing import Any
@@ -15,9 +16,9 @@ from textual.timer import Timer
 from textual.widgets import Footer, OptionList, RichLog, Static, TextArea
 from textual.widgets._option_list import Option
 
-from cowcode.agent import Agent, Phase
+from cowcode.agent import Agent, Mode, Phase
 from cowcode.config import Config, ConfigError, ProviderConfig, load_configs
-from cowcode.prompt import get_system_prompt
+from cowcode.prompt import EXECUTE_DIRECTIVE, get_system_prompt
 from cowcode.provider import Provider, create_provider
 from cowcode.session import Session
 from cowcode.tool import Registry, new_default_registry, truncate_text
@@ -34,6 +35,23 @@ CAT_BANNER = r"""
  | |___| (_) \ V  V / (_| (_) | (_| |  __/
   \____|\___/ \_/\_/ \___\___/ \__,_|\___|
 """
+
+
+def _compact_tok(n: int) -> str:
+    """紧凑 token 数字。"""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return str(n)
+
+
+class ToolDisplay:
+    """动态区展示的单个在跑工具。"""
+
+    def __init__(self, name: str, args: str) -> None:
+        self.name = name
+        self.args = args
 
 
 class ContextHeader(Static):
@@ -140,8 +158,8 @@ class CowcodeApp(App[Any]):
     """Cowcode 主 TUI 应用。"""
 
     BINDINGS = [
-        Binding("escape", "quit", "Quit"),
-        Binding("ctrl+c", "quit", "Quit"),
+        Binding("escape", "cancel_or_quit", "Cancel/Quit"),
+        Binding("ctrl+c", "cancel_or_quit", "Cancel/Quit"),
         Binding("ctrl+t", "toggle_context", "Context"),
     ]
 
@@ -226,6 +244,14 @@ class CowcodeApp(App[Any]):
         self._context_header: ContextHeader
         self._streaming_response: Static
 
+        # ch04 新增字段
+        self._mode: Mode = Mode.NORMAL
+        self._iter: int = 0
+        self._usage_in: int = 0
+        self._usage_out: int = 0
+        self._cur_tools: list[ToolDisplay] = []
+        self._turn_cancel: asyncio.Event | None = None
+
     def compose(self) -> ComposeResult:
         yield Static(CAT_BANNER, id="banner")
         yield ContextHeader()
@@ -263,11 +289,19 @@ class CowcodeApp(App[Any]):
     def action_toggle_context(self) -> None:
         self._context_header.toggle_context()
 
+    def action_cancel_or_quit(self) -> None:
+        """Esc/Ctrl+C：流式态取消本轮；空闲态退出。"""
+        if self._is_streaming and self._turn_cancel is not None:
+            self._turn_cancel.set()
+        else:
+            self.exit()
+
     def _select_provider(self, provider_config: ProviderConfig) -> None:
         self._selected_provider = provider_config
         self._session = Session()
         self._session.add_system_prompt(get_system_prompt(self._config.system_prompt))
         self._provider = create_provider(provider_config)
+        self._mode = Mode.NORMAL
         self._update_status_bar()
         self._input.focus()
 
@@ -279,9 +313,16 @@ class CowcodeApp(App[Any]):
     def _update_status_bar(self) -> None:
         if self._selected_provider is None:
             return
-        self._status_bar.update(
-            f"{self._selected_provider.name}  |  {self._selected_provider.model}"
-        )
+        parts = [self._selected_provider.name]
+        if self._mode == Mode.PLAN:
+            parts.append("[bold yellow]PLAN[/]")
+        parts.append("|")
+        parts.append(self._selected_provider.model)
+        if self._usage_in or self._usage_out:
+            parts.append(
+                f"↑{_compact_tok(self._usage_in)} ↓{_compact_tok(self._usage_out)} tok"
+            )
+        self._status_bar.update(Text.from_markup("  ".join(parts)))
 
     def _start_timer(self) -> None:
         self._timer_start = time.time()
@@ -292,7 +333,18 @@ class CowcodeApp(App[Any]):
 
     def _update_timer_display(self) -> None:
         elapsed = time.time() - self._timer_start
-        self._timer_label.update(f"Imagining... ({elapsed:.1f}s)")
+        parts = []
+        if self._cur_tools:
+            parts.append(
+                "\n".join(f"● {td.name}({td.args}) Running…" for td in self._cur_tools)
+            )
+        else:
+            status = f"Imagining… ({elapsed:.1f}s"
+            if self._iter > 0:
+                status += f" · 第 {self._iter} 轮"
+            status += ")"
+            parts.append(status)
+        self._timer_label.update("\n".join(parts))
 
     def _stop_timer(self) -> None:
         elapsed = time.time() - self._timer_start
@@ -310,6 +362,10 @@ class CowcodeApp(App[Any]):
         self._conversation.write("")
         self._conversation.write(Text(f"Error: {text}", style="bold red"))
 
+    def _print_notice(self, text: str) -> None:
+        self._conversation.write("")
+        self._conversation.write(Text(text, style="dim italic"))
+
     def _set_streaming_response(self, text: str) -> None:
         if text:
             self._streaming_response.update(Text(f"Cowcode:\n{text}", style="yellow"))
@@ -323,7 +379,9 @@ class CowcodeApp(App[Any]):
     def _print_tool_result(self, result: str, is_error: bool) -> None:
         style = "red" if is_error else "dim"
         summary = truncate_text(result, max_lines=8, max_chars=1200)
-        self._conversation.write(Text("  -> " + summary.replace("\n", "\n     "), style=style))
+        self._conversation.write(
+            Text("  -> " + summary.replace("\n", "\n     "), style=style)
+        )
 
     async def _handle_send(self) -> None:
         """提交当前输入，并消费 Agent 事件流。"""
@@ -337,22 +395,44 @@ class CowcodeApp(App[Any]):
             self.exit()
             return
 
-        self._input.clear()
         if self._session is None or self._provider is None:
             self._print_error("Not connected to a provider.")
             return
 
-        self._is_streaming = True
-        self._context_header.set_context(user_text)
-        self._print_user(user_text)
-        self._session.append("user", user_text)
+        self._input.clear()
+
+        # 处理 /plan 和 /do
+        if user_text == "/plan":
+            self._mode = Mode.PLAN
+            self._print_notice(
+                "已进入计划模式（只读工具），产出计划后请用 /do 批准执行。"
+            )
+            self._update_status_bar()
+            return
+
+        if user_text == "/do":
+            self._mode = Mode.NORMAL
+            self._session.append("user", EXECUTE_DIRECTIVE)
+            self._print_notice("已切回正常模式，开始按计划执行。")
+            self._update_status_bar()
+            # 走启动流程
+        else:
+            # 普通文本
+            self._is_streaming = True
+            self._context_header.set_context(user_text)
+            self._print_user(user_text)
+            self._session.append("user", user_text)
+
         self._full_response = ""
         self._set_streaming_response("")
         self._start_timer()
+        self._turn_cancel = asyncio.Event()
+        self._is_streaming = True
+        self._iter = 0
 
         agent = Agent(self._provider, self._tool_registry)
         try:
-            async for event in agent.run(self._session):
+            async for event in agent.run(self._session, self._mode, self._turn_cancel):
                 if event.err is not None:
                     self._print_error(str(event.err))
                     break
@@ -360,29 +440,54 @@ class CowcodeApp(App[Any]):
                     self._full_response += event.text
                     self._set_streaming_response(self._full_response)
                 if event.tool is not None:
-                    if self._full_response:
-                        self._conversation.write("")
-                        self._conversation.write(Text("Cowcode:", style="bold yellow"))
-                        self._conversation.write(Markdown(self._full_response))
-                        self._full_response = ""
-                        self._set_streaming_response("")
+                    # 首个工具前先提交 preamble
+                    if self._full_response and event.tool.phase == Phase.START:
+                        # 只在没多个工具追加时才提交（提交只在第一次工具出现时做）
+                        pass
                     if event.tool.phase == Phase.START:
+                        if self._full_response:
+                            self._conversation.write("")
+                            self._conversation.write(
+                                Text("Cowcode:", style="bold yellow")
+                            )
+                            self._conversation.write(Markdown(self._full_response))
+                            self._full_response = ""
+                            self._set_streaming_response("")
+                        self._cur_tools.append(
+                            ToolDisplay(event.tool.name, event.tool.args)
+                        )
                         self._print_tool_start(event.tool.name, event.tool.args)
+                        self._update_timer_display()
                     else:
+                        # PHASE_END：FIFO 弹出队首
+                        if self._cur_tools:
+                            self._cur_tools.pop(0)
                         self._print_tool_result(event.tool.result, event.tool.is_error)
+                        self._update_timer_display()
+                if event.usage is not None:
+                    self._usage_in += event.usage.input_tokens
+                    self._usage_out += event.usage.output_tokens
+                    self._update_status_bar()
+                if event.iter > 0:
+                    self._iter = event.iter
+                    self._update_timer_display()
+                if event.notice:
+                    self._print_notice(event.notice)
                 if event.done:
                     break
         finally:
             self._is_streaming = False
             self._stop_timer()
             self._context_header.clear_context()
+            self._cur_tools.clear()
+            self._iter = 0
+            self._turn_cancel = None
 
         if self._full_response:
             self._set_streaming_response("")
             self._conversation.write("")
             self._conversation.write(Text("Cowcode:", style="bold yellow"))
             self._conversation.write(Markdown(self._full_response))
-
 
 
 def main() -> None:

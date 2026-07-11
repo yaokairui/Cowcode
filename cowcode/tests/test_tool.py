@@ -31,7 +31,9 @@ async def test_read_file_success_and_missing(tmp_path) -> None:
     registry = new_default_registry()
 
     ok = await registry.execute("read_file", json.dumps({"path": str(path)}))
-    missing = await registry.execute("read_file", json.dumps({"path": str(tmp_path / "nope.txt")}))
+    missing = await registry.execute(
+        "read_file", json.dumps({"path": str(tmp_path / "nope.txt")})
+    )
 
     assert not ok.is_error
     assert "     1\thello" in ok.content
@@ -105,7 +107,7 @@ async def test_registry_timeout() -> None:
 
     result = await registry.execute(
         "bash",
-        json.dumps({"command": "python -c \"import time; time.sleep(2)\""}),
+        json.dumps({"command": 'python -c "import time; time.sleep(2)"'}),
         timeout=0.1,
     )
 

@@ -14,6 +14,10 @@ _MAX_LINE_LENGTH = 1_000_000
 
 
 class GrepTool:
+    @property
+    def read_only(self) -> bool:
+        return True
+
     def name(self) -> str:
         return "grep"
 

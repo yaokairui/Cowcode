@@ -9,6 +9,10 @@ from cowcode.tool import Result
 
 
 class WriteFileTool:
+    @property
+    def read_only(self) -> bool:
+        return False
+
     def name(self) -> str:
         return "write_file"
 

@@ -9,6 +9,10 @@ from cowcode.tool import Result
 
 
 class EditFileTool:
+    @property
+    def read_only(self) -> bool:
+        return False
+
     def name(self) -> str:
         return "edit_file"
 

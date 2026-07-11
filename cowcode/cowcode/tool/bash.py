@@ -9,6 +9,10 @@ from cowcode.tool import Result, truncate_text
 
 
 class BashTool:
+    @property
+    def read_only(self) -> bool:
+        return False
+
     def name(self) -> str:
         return "bash"
 
@@ -47,9 +51,5 @@ class BashTool:
             raise
         stdout = stdout_b.decode("utf-8", errors="replace")
         stderr = stderr_b.decode("utf-8", errors="replace")
-        output = (
-            f"exit_code: {proc.returncode}\n"
-            f"stdout:\n{stdout}\n"
-            f"stderr:\n{stderr}"
-        )
+        output = f"exit_code: {proc.returncode}\nstdout:\n{stdout}\nstderr:\n{stderr}"
         return Result(truncate_text(output, max_lines=10_000, max_chars=30_000))
