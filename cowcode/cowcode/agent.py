@@ -200,7 +200,7 @@ class Agent:
         self,
         session: Session,
         definitions: list[ToolDefinition],
-        suffix: str,
+        reminder: str,
         cancel: asyncio.Event,
         state: _RoundState,
     ) -> AsyncIterator[Event]:
