@@ -139,7 +139,7 @@ def check(
 
 
 # Monkey-patch check onto Engine so Agent code can call engine.check(...)
-Engine.check = staticmethod(check)  # type: ignore[attr-defined]
+Engine.check = lambda self, mode, call, read_only: check(self, mode, call, read_only)  # type: ignore[attr-defined]
 
 
 def _cat_label(cat: Category) -> str:
