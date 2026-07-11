@@ -138,9 +138,12 @@ def check(
     return Decision.ASK, f"{mode} 模式下 {_cat_label(cat)} 类操作需确认"
 
 
+# Monkey-patch check onto Engine so Agent code can call engine.check(...)
+Engine.check = staticmethod(check)  # type: ignore[attr-defined]
+
+
 def _cat_label(cat: Category) -> str:
     return {Category.READ: "只读", Category.WRITE: "文件写", Category.EXEC: "命令执行"}.get(cat, "未知")
-
 
 def start_mode(engine: Engine) -> Mode:
     return engine.start_mode
