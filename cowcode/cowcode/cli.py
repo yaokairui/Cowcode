@@ -292,7 +292,7 @@ class CowcodeApp(App[Any]):
         self._streaming_response: Static
 
         # 权限模式与待批准状态
-        self._mode: Mode = engine.start_mode() if engine else Mode.DEFAULT
+        self._mode: Mode = engine.start_mode if engine else Mode.DEFAULT
         self._iter: int = 0
         self._usage_in: int = 0
         self._usage_out: int = 0
@@ -380,7 +380,7 @@ class CowcodeApp(App[Any]):
         self._selected_provider = provider_config
         self._session = Session()
         self._provider = create_provider(provider_config)
-        self._mode = self._engine.start_mode() if self._engine else Mode.DEFAULT
+        self._mode = self._engine.start_mode if self._engine else Mode.DEFAULT
         self._update_status_bar()
         self._input.focus()
 
