@@ -139,6 +139,47 @@ class ProviderSelectScreen(Screen[str]):
         self.dismiss(str(event.option_id))
 
 
+class AskUserQuestionScreen(Screen[str]):
+    """澄清问题弹窗——展示问题 + 可选项列表 + 自定义输入。"""
+
+    def __init__(self, question: str, options: list[str]) -> None:
+        super().__init__()
+        self._question = question
+        self._options = options
+
+    def compose(self) -> ComposeResult:
+        yield Static(
+            Text(f"❓ {self._question}", style="bold yellow"),
+            id="ask-question",
+        )
+        option_list = OptionList(id="ask-options")
+        for index, opt in enumerate(self._options):
+            option_list.add_option(Option(opt, id=str(index)))
+        yield option_list
+        yield TextArea(
+            "",
+            id="ask-custom",
+            placeholder="Or type your own answer… (Alt+Enter to submit)",
+            show_line_numbers=False,
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#ask-options", OptionList).focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        opt_index = int(event.option_id)
+        if 0 <= opt_index < len(self._options):
+            self.dismiss(self._options[opt_index])
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        text = event.text_area.text
+        if text.endswith("\n"):
+            clean = text.strip()
+            if clean:
+                event.text_area.text = ""
+                self.dismiss(clean)
+
+
 class MessageInput(TextArea):
     """处理消息输入框的发送和换行快捷键。"""
 
@@ -445,6 +486,22 @@ class CowcodeApp(App[Any]):
 
         self._start_agent_run(self._mode)
 
+    def _on_user_answer(self, answer: str | None) -> None:
+        """澄清弹窗回调——收到用户选择或自定义输入。"""
+        if answer is None or self._pending_question is None:
+            self._pending_question = None
+            return
+        pending = self._pending_question
+        self._pending_question = None
+
+        self._print_user(answer)
+        self._session.append(
+            "user",
+            f"Answer to: {pending.question}\n\n{answer}",
+        )
+        self._print_notice("继续…")
+        self._start_agent_run(self._ask_user_mode)
+
     def _start_agent_run(self, mode: Mode) -> None:
         """启动 Agent Loop 并消费事件流。"""
         if self._session is None or self._provider is None:
@@ -516,39 +573,31 @@ class CowcodeApp(App[Any]):
                 if event.done:
                     break
                 if event.ask_user is not None:
-                    # 暂停 Agent Loop 等待用户回答
+                    # 弹窗让用户选择或自定义输入
                     self._pending_question = event.ask_user
                     self._ask_user_mode = mode
-                    self._conversation.write("")
-                    self._conversation.write(
-                        Text("Cowcode:", style="bold yellow")
-                    )
-                    opts_md = ""
                     if event.ask_user.options:
-                        opts_md = "\n".join(
-                            f"- {opt}" for opt in event.ask_user.options
-                        ) + "\n\n"
-                    self._conversation.write(
-                        Markdown(
-                            f"**❓ {event.ask_user.question}**\n\n"
-                            + opts_md
-                        )
-                    )
-                    if event.ask_user.options:
-                        self._conversation.write(
-                            Text(
-                                "请选择或输入回答后按 Enter 继续…",
-                                style="italic",
-                            )
+                        self.push_screen(
+                            AskUserQuestionScreen(
+                                event.ask_user.question, event.ask_user.options
+                            ),
+                            callback=self._on_user_answer,
                         )
                     else:
+                        self._conversation.write("")
+                        self._conversation.write(
+                            Text("Cowcode:", style="bold yellow")
+                        )
+                        self._conversation.write(
+                            Markdown(f"**❓ {event.ask_user.question}**")
+                        )
                         self._conversation.write(
                             Text(
                                 "\n请在输入框中回答后按 Enter 继续…",
                                 style="italic",
                             )
                         )
-                    self._input.focus()
+                        self._input.focus()
                     break
         finally:
             self._is_streaming = False
