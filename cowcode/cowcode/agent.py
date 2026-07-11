@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json as _json
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import AsyncIterator
@@ -43,6 +44,16 @@ class Event:
     notice: str = ""
     done: bool = False
     err: Exception | None = None
+    ask_user: "AskUserEvent | None" = None
+
+
+@dataclass
+class AskUserEvent:
+    """模型向用户发起澄清提问——TUI 应展示问题并等待回答。"""
+
+    question: str
+    options: list[str] = field(default_factory=list)
+    tool_call_id: str = ""
 
 
 class Phase:
@@ -79,6 +90,7 @@ class _ExecutionState:
 
     results: list[ToolResult] = field(default_factory=list)
     completed: bool = True
+    paused_for_user: bool = False
 
 
 # ----- Agent -----
@@ -170,12 +182,14 @@ class Agent:
 
             # 保序分批执行
             execution_state = _ExecutionState()
-            async for event in self._execute_batched(
-                calls, cancel, execution_state
-            ):
+            async for event in self._execute_batched(calls, cancel, execution_state):
                 yield event
 
             session.add_tool_results(execution_state.results)
+
+            # AskUserQuestion 暂停：退出循环，等待 CLI 以回答重启
+            if execution_state.paused_for_user:
+                return
 
             # 取消：最高优先级终止
             if not execution_state.completed:
@@ -205,8 +219,17 @@ class Agent:
         state: _RoundState,
     ) -> AsyncIterator[Event]:
         """单轮流式收集；事件实时转发，最终值写入 state。"""
+        request = Request(
+            messages=session.get_history(),
+            tools=list(definitions),
+            system=SystemPrompt(
+                stable=self._system_prompt,
+                environment=self._environment,
+            ),
+            reminder=reminder,
+        )
         try:
-            async for ev in self._provider.stream(session, definitions, suffix):
+            async for ev in self._provider.stream(request):
                 if cancel.is_set():
                     state.ok = False
                     return
@@ -235,7 +258,11 @@ class Agent:
         cancel: asyncio.Event,
         state: _ExecutionState,
     ) -> AsyncIterator[Event]:
-        """保序分批并发执行工具；START/END 事件实时转发。"""
+        """保序分批并发执行工具；START/END 事件实时转发。
+
+        AskUserQuestion 被特殊拦截：发出 ask_user 事件、写入等待结果后，
+        本轮循环终止，由 CLI 收集用户回答后重新启动 Agent。
+        """
         results: list[ToolResult | None] = [None] * len(calls)
 
         i = 0
@@ -245,6 +272,46 @@ class Agent:
                 state.results = self._coalesce_results(results)
                 state.completed = False
                 return
+
+            call = calls[i]
+
+            # ----- AskUserQuestion 拦截 -----
+            if call.name == "AskUserQuestion":
+                yield Event(
+                    tool=ToolEvent(
+                        name=call.name,
+                        args=self._args_preview(call.input or "{}"),
+                        phase=Phase.START,
+                    )
+                )
+                question, options = self._parse_ask_user_input(call.input or "{}")
+                results[i] = ToolResult(
+                    tool_call_id=call.id,
+                    content=f"Question: {question}",
+                    is_error=False,
+                )
+                state.results = self._coalesce_results(results)
+                state.completed = True
+                state.paused_for_user = True
+                yield Event(
+                    tool=ToolEvent(
+                        name=call.name,
+                        args=self._args_preview(call.input or "{}"),
+                        phase=Phase.END,
+                        result=results[i].content,
+                        is_error=False,
+                    )
+                )
+                yield Event(
+                    ask_user=AskUserEvent(
+                        question=question,
+                        options=options,
+                        tool_call_id=call.id,
+                    )
+                )
+                # 本轮结束——CLI 收到 ask_user 后应重启 Agent
+                return
+            # ----- 常规工具继续 -----
 
             # 向前吃连续只读
             j = i
@@ -409,3 +476,16 @@ class Agent:
             else ToolResult(tool_call_id="", content="(no result)", is_error=True)
             for r in results
         ]
+
+    @staticmethod
+    def _parse_ask_user_input(raw: str) -> tuple[str, list[str]]:
+        """从 AskUserQuestion 的 JSON args 中提取 question 和 options。"""
+        try:
+            data = _json.loads(raw)
+        except Exception:
+            return raw, []
+        question = data.get("question", raw) if isinstance(data, dict) else raw
+        options = data.get("options") if isinstance(data, dict) else None
+        if isinstance(options, list) and all(isinstance(o, str) for o in options):
+            return str(question), options  # type: ignore[arg-type]
+        return str(question), []

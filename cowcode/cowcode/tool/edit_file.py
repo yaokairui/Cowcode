@@ -17,7 +17,10 @@ class EditFileTool:
         return "edit_file"
 
     def description(self) -> str:
-        return "Replace one unique text snippet in a file."
+        return (
+            "Replace one unique text snippet in a file. Read the target first with "
+            "read_file and ensure old_string matches exactly once."
+        )
 
     def parameters(self) -> dict:
         return {

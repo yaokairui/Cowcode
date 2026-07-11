@@ -40,7 +40,9 @@ class Module:
 def fixed_modules() -> list[Module]:
     """返回七个固定系统模块。"""
     return [
-        Module("identity", 10, "You are Cowcode, a coding agent running in a terminal."),
+        Module(
+            "identity", 10, "You are Cowcode, a coding agent running in a terminal."
+        ),
         Module(
             "constraints",
             20,
@@ -59,7 +61,10 @@ def fixed_modules() -> list[Module]:
         Module(
             "tools",
             50,
-            "Prefer read_file, glob, and grep over assembling equivalent shell commands. Before editing a file, you must read it first.",
+            "Prefer read_file, glob, and grep over assembling equivalent shell commands. "
+            "Before editing a file, you must read it first. "
+            "When requirements are unclear, use AskUserQuestion to ask the user for clarification "
+            "before proceeding — ask only the most critical questions, and continue after receiving the answer.",
         ),
         Module("style", 60, "Be concise, direct, honest, and avoid flattery."),
         Module(
@@ -82,7 +87,9 @@ def optional_modules(custom_prompt: str = "") -> list[Module]:
 def assemble_system(modules: list[Module]) -> str:
     """按优先级稳定装配非空模块。"""
     ordered = sorted(enumerate(modules), key=lambda item: (item[1].priority, item[0]))
-    return "\n\n".join(module.content.strip() for _, module in ordered if module.content.strip())
+    return "\n\n".join(
+        module.content.strip() for _, module in ordered if module.content.strip()
+    )
 
 
 def build_system_prompt(custom_prompt: str = "") -> str:
@@ -96,11 +103,16 @@ PLAN_REMINDER_INTERVAL = 4
 EXECUTE_DIRECTIVE = "请按上面的计划开始执行。"
 
 _PLAN_FULL = (
-    "You are in PLAN MODE. Use only read-only tools (read_file, glob, grep) "
-    "to investigate. Do not modify files or run shell commands. Produce a clear "
+    "You are in PLAN MODE. Use only read-only tools (read_file, glob, grep, AskUserQuestion) "
+    "to investigate and clarify. If requirements are unclear or ambiguous, call AskUserQuestion "
+    "to ask the user for clarification before making assumptions — focus on the most critical "
+    "unknowns that block planning. Do not modify files or run shell commands. Produce a clear "
     "step-by-step plan, then wait for the user to approve it with /do."
 )
-_PLAN_CONCISE = "Remain in PLAN MODE: investigate read-only, refine the plan, and do not implement."
+_PLAN_CONCISE = (
+    "Remain in PLAN MODE: investigate read-only, clarify with AskUserQuestion if needed, "
+    "refine the plan, and do not implement."
+)
 
 
 def system_reminder(body: str) -> str:

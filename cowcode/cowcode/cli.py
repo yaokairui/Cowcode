@@ -16,9 +16,11 @@ from textual.timer import Timer
 from textual.widgets import Footer, OptionList, RichLog, Static, TextArea
 from textual.widgets._option_list import Option
 
-from cowcode.agent import Agent, Mode, Phase
+from cowcode import __version__
+from cowcode.agent import Agent, AskUserEvent, Mode, Phase
 from cowcode.config import Config, ConfigError, ProviderConfig, load_configs
-from cowcode.prompt import EXECUTE_DIRECTIVE, get_system_prompt
+from cowcode.environment import gather_environment
+from cowcode.prompt import EXECUTE_DIRECTIVE, build_system_prompt
 from cowcode.provider import Provider, create_provider
 from cowcode.session import Session
 from cowcode.tool import Registry, new_default_registry, truncate_text
@@ -252,6 +254,10 @@ class CowcodeApp(App[Any]):
         self._cur_tools: list[ToolDisplay] = []
         self._turn_cancel: asyncio.Event | None = None
 
+        # 交互式澄清状态
+        self._pending_question: AskUserEvent | None = None
+        self._ask_user_mode: Mode = Mode.NORMAL
+
     def compose(self) -> ComposeResult:
         yield Static(CAT_BANNER, id="banner")
         yield ContextHeader()
@@ -299,7 +305,6 @@ class CowcodeApp(App[Any]):
     def _select_provider(self, provider_config: ProviderConfig) -> None:
         self._selected_provider = provider_config
         self._session = Session()
-        self._session.add_system_prompt(get_system_prompt(self._config.system_prompt))
         self._provider = create_provider(provider_config)
         self._mode = Mode.NORMAL
         self._update_status_bar()
@@ -391,6 +396,22 @@ class CowcodeApp(App[Any]):
         user_text = self._input.text.strip()
         if not user_text:
             return
+
+        # ----- 交互式澄清回答 -----
+        if self._pending_question is not None:
+            pending = self._pending_question
+            self._pending_question = None
+            self._input.clear()
+            self._print_user(user_text)
+            self._session.append(
+                "user",
+                f"Answer to: {pending.question}\n\n{user_text}",
+            )
+            self._print_notice("继续…")
+            # 以澄清前的 mode 继续运行
+            self._start_agent_run(self._ask_user_mode)
+            return
+
         if user_text.lower() in {"quit", "exit", "/exit"}:
             self.exit()
             return
@@ -418,10 +439,17 @@ class CowcodeApp(App[Any]):
             # 走启动流程
         else:
             # 普通文本
-            self._is_streaming = True
             self._context_header.set_context(user_text)
             self._print_user(user_text)
             self._session.append("user", user_text)
+
+        self._start_agent_run(self._mode)
+
+    def _start_agent_run(self, mode: Mode) -> None:
+        """启动 Agent Loop 并消费事件流。"""
+        if self._session is None or self._provider is None:
+            self._print_error("Not connected to a provider.")
+            return
 
         self._full_response = ""
         self._set_streaming_response("")
@@ -430,9 +458,21 @@ class CowcodeApp(App[Any]):
         self._is_streaming = True
         self._iter = 0
 
-        agent = Agent(self._provider, self._tool_registry)
+        environment = gather_environment(
+            version=__version__, model=self._selected_provider.model
+        ).render()
+        agent = Agent(
+            self._provider,
+            self._tool_registry,
+            system_prompt=build_system_prompt(self._config.system_prompt),
+            environment=environment,
+        )
+        self.run_worker(self._consume_agent_events(agent, mode), exclusive=True)
+
+    async def _consume_agent_events(self, agent: Agent, mode: Mode) -> None:
+        """消费 Agent 事件流——由 Textual worker 驱动。"""
         try:
-            async for event in agent.run(self._session, self._mode, self._turn_cancel):
+            async for event in agent.run(self._session, mode, self._turn_cancel):
                 if event.err is not None:
                     self._print_error(str(event.err))
                     break
@@ -474,6 +514,41 @@ class CowcodeApp(App[Any]):
                 if event.notice:
                     self._print_notice(event.notice)
                 if event.done:
+                    break
+                if event.ask_user is not None:
+                    # 暂停 Agent Loop 等待用户回答
+                    self._pending_question = event.ask_user
+                    self._ask_user_mode = mode
+                    self._conversation.write("")
+                    self._conversation.write(
+                        Text("Cowcode:", style="bold yellow")
+                    )
+                    opts_md = ""
+                    if event.ask_user.options:
+                        opts_md = "\n".join(
+                            f"- {opt}" for opt in event.ask_user.options
+                        ) + "\n\n"
+                    self._conversation.write(
+                        Markdown(
+                            f"**❓ {event.ask_user.question}**\n\n"
+                            + opts_md
+                        )
+                    )
+                    if event.ask_user.options:
+                        self._conversation.write(
+                            Text(
+                                "请选择或输入回答后按 Enter 继续…",
+                                style="italic",
+                            )
+                        )
+                    else:
+                        self._conversation.write(
+                            Text(
+                                "\n请在输入框中回答后按 Enter 继续…",
+                                style="italic",
+                            )
+                        )
+                    self._input.focus()
                     break
         finally:
             self._is_streaming = False

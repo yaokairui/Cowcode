@@ -10,7 +10,7 @@ import httpx
 
 from cowcode.config import ProviderConfig
 from cowcode.provider.base import Provider, ProviderError, Request
-from cowcode.session import Message, StreamEvent, ToolCall, ToolDefinition, Usage
+from cowcode.session import StreamEvent, ToolCall, ToolDefinition, Usage
 
 __all__ = ["OpenAIProvider"]
 
@@ -64,14 +64,9 @@ class OpenAIProvider(Provider):
                         if not choices:
                             chunk_usage = data.get("usage")
                             if chunk_usage:
-                                usage_input = chunk_usage.get("prompt_tokens", 0) or 0
-                                usage_output = (
-                                    chunk_usage.get("completion_tokens", 0) or 0
+                                usage_input, usage_output, cache_read = (
+                                    self._parse_usage(chunk_usage)
                                 )
-                                details = (
-                                    chunk_usage.get("prompt_tokens_details") or {}
-                                )
-                                cache_read = details.get("cached_tokens", 0) or 0
                             continue
 
                         delta = choices[0].get("delta", {})
@@ -120,9 +115,7 @@ class OpenAIProvider(Provider):
             "stream_options": {"include_usage": True},
         }
         if request.tools:
-            payload["tools"] = [
-                self._tool_definition(tool) for tool in request.tools
-            ]
+            payload["tools"] = [self._tool_definition(tool) for tool in request.tools]
         return payload
 
     def _build_messages_payload(self, request: Request) -> list[dict[str, Any]]:
@@ -169,6 +162,36 @@ class OpenAIProvider(Provider):
         if request.reminder:
             payload.append({"role": "user", "content": request.reminder})
         return payload
+
+    @staticmethod
+    def _parse_usage(usage: Any) -> tuple[int, int, int]:
+        """解析 OpenAI usage 与自动缓存命中字段。"""
+        if not isinstance(usage, dict):
+            return 0, 0, 0
+        details = usage.get("prompt_tokens_details") or {}
+        cached = (
+            details.get("cached_tokens", 0) or 0 if isinstance(details, dict) else 0
+        )
+        return (
+            usage.get("prompt_tokens", 0) or 0,
+            usage.get("completion_tokens", 0) or 0,
+            cached,
+        )
+
+    @staticmethod
+    def _parse_usage(usage: Any) -> tuple[int, int, int]:
+        """解析 OpenAI usage 与自动缓存命中字段。"""
+        if not isinstance(usage, dict):
+            return 0, 0, 0
+        details = usage.get("prompt_tokens_details") or {}
+        cached = (
+            details.get("cached_tokens", 0) or 0 if isinstance(details, dict) else 0
+        )
+        return (
+            usage.get("prompt_tokens", 0) or 0,
+            usage.get("completion_tokens", 0) or 0,
+            cached,
+        )
 
     @staticmethod
     def _tool_definition(tool: ToolDefinition) -> dict[str, Any]:

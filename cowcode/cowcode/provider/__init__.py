@@ -5,14 +5,12 @@ and a factory function to create the appropriate backend based on config.
 """
 
 from cowcode.provider.anthropic import AnthropicProvider
-from cowcode.provider.base import Provider, ProviderError, Request, SystemPrompt, Request, SystemPrompt
+from cowcode.provider.base import Provider, ProviderError, Request, SystemPrompt
 from cowcode.provider.openai import OpenAIProvider
 
 __all__ = [
     "Provider",
     "ProviderError",
-    "Request",
-    "SystemPrompt",
     "Request",
     "SystemPrompt",
     "AnthropicProvider",

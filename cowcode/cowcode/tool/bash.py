@@ -17,7 +17,11 @@ class BashTool:
         return "bash"
 
     def description(self) -> str:
-        return "Run a shell command in the current working directory."
+        return (
+            "Run a shell command in the current working directory. "
+            "Prefer read_file, glob, and grep for reading files, finding paths, "
+            "and searching content instead of assembling shell commands."
+        )
 
     def parameters(self) -> dict:
         return {

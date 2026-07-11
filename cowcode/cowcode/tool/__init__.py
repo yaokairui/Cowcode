@@ -123,7 +123,8 @@ def truncate_text(text: str, max_lines: int, max_chars: int) -> str:
 
 
 def new_default_registry() -> Registry:
-    """构造默认 6 个工具。"""
+    """构造默认工具集——含 6 个文件工具 + AskUserQuestion 澄清工具。"""
+    from cowcode.tool.ask_user_question import AskUserQuestionTool
     from cowcode.tool.bash import BashTool
     from cowcode.tool.edit_file import EditFileTool
     from cowcode.tool.glob_tool import GlobTool
@@ -138,4 +139,5 @@ def new_default_registry() -> Registry:
     registry.register(BashTool())
     registry.register(GlobTool())
     registry.register(GrepTool())
+    registry.register(AskUserQuestionTool())
     return registry

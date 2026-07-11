@@ -68,11 +68,10 @@ class AnthropicProvider(Provider):
                             continue
 
                         if event_name == "message_start":
-                            msg = data.get("message") or {}
-                            usg = msg.get("usage") or {}
-                            usage_input = usg.get("input_tokens", 0) or 0
-                            cache_write = usg.get("cache_creation_input_tokens", 0) or 0
-                            cache_read = usg.get("cache_read_input_tokens", 0) or 0 or 0
+                            usg = data.get("message", {}).get("usage") or {}
+                            usage_input, cache_write, cache_read = (
+                                self._parse_start_usage(usg)
+                            ) or 0
                             cache_write = usg.get("cache_creation_input_tokens", 0) or 0
                             cache_read = usg.get("cache_read_input_tokens", 0) or 0
                         elif event_name == "content_block_start":
@@ -82,8 +81,7 @@ class AnthropicProvider(Provider):
                             if event is not None:
                                 yield event
                         elif event_name == "message_delta":
-                            usg = data.get("usage") or {}
-                            usage_output = usg.get("output_tokens", 0) or 0
+                            usage_output = self._parse_output_usage(data.get("usage"))
 
                 if tool_blocks:
                     yield StreamEvent(tool_calls=self._build_tool_calls(tool_blocks))
@@ -123,22 +121,16 @@ class AnthropicProvider(Provider):
                 }
             )
         if request.system.environment:
-            system_blocks.append(
-                {"type": "text", "text": request.system.environment}
-            )
+            system_blocks.append({"type": "text", "text": request.system.environment})
         if system_blocks:
             payload["system"] = system_blocks
         if request.tools:
-            payload["tools"] = [
-                self._tool_definition(tool) for tool in request.tools
-            ]
+            payload["tools"] = [self._tool_definition(tool) for tool in request.tools]
         if self._thinking and not self._history_has_tools(request.messages):
             payload["thinking"] = {"type": "enabled", "budget_tokens": 1024}
         return payload
 
-    def _build_messages_payload(
-        self, messages: list[Message]
-    ) -> list[dict[str, Any]]:
+    def _build_messages_payload(self, messages: list[Message]) -> list[dict[str, Any]]:
         payload: list[dict[str, Any]] = []
         for message in messages:
             if message.role == "system":
@@ -193,6 +185,38 @@ class AnthropicProvider(Provider):
                 ]
             return
         messages.append({"role": "user", "content": [block]})
+
+    @staticmethod
+    def _parse_start_usage(usage: Any) -> tuple[int, int, int]:
+        """解析 Anthropic message_start 用量，缺字段按零。"""
+        if not isinstance(usage, dict):
+            return 0, 0, 0
+        return (
+            usage.get("input_tokens", 0) or 0,
+            usage.get("cache_creation_input_tokens", 0) or 0,
+            usage.get("cache_read_input_tokens", 0) or 0,
+        )
+
+    @staticmethod
+    def _parse_output_usage(usage: Any) -> int:
+        """解析 Anthropic message_delta 输出用量。"""
+        return (usage.get("output_tokens", 0) or 0) if isinstance(usage, dict) else 0
+
+    @staticmethod
+    def _parse_start_usage(usage: Any) -> tuple[int, int, int]:
+        """解析 Anthropic message_start 用量，缺字段按零。"""
+        if not isinstance(usage, dict):
+            return 0, 0, 0
+        return (
+            usage.get("input_tokens", 0) or 0,
+            usage.get("cache_creation_input_tokens", 0) or 0,
+            usage.get("cache_read_input_tokens", 0) or 0,
+        )
+
+    @staticmethod
+    def _parse_output_usage(usage: Any) -> int:
+        """解析 Anthropic message_delta 输出用量。"""
+        return (usage.get("output_tokens", 0) or 0) if isinstance(usage, dict) else 0
 
     @staticmethod
     def _handle_block_start(
