@@ -50,6 +50,10 @@ def _compact_tok(n: int) -> str:
     return str(n)
 
 
+def _format_mcp_status(server_count: int, tool_count: int) -> str:
+    return f"Connected to {server_count} MCP server(s), {tool_count} tools registered"
+
+
 class ToolDisplay:
     """动态区展示的单个在跑工具。"""
 
@@ -272,12 +276,16 @@ class CowcodeApp(App[Any]):
         config: Config,
         registry: Registry | None = None,
         engine: Engine | None = None,
+        mcp_server_count: int = 0,
+        mcp_tool_count: int = 0,
     ) -> None:
         super().__init__()
         self._providers = providers
         self._config = config
         self._tool_registry = registry or new_default_registry()
         self._engine = engine
+        self._mcp_server_count = mcp_server_count
+        self._mcp_tool_count = mcp_tool_count
         self._selected_provider: ProviderConfig | None = None
         self._provider: Provider | None = None
         self._session: Session | None = None
@@ -330,6 +338,15 @@ class CowcodeApp(App[Any]):
         self._streaming_response = self.query_one("#streaming-response", Static)
 
         self._conversation.write(Text(f"cwd: {Path.cwd()}", style="dim"))
+        self._conversation.write(
+            Text(
+                _format_mcp_status(
+                    self._mcp_server_count,
+                    self._mcp_tool_count,
+                ),
+                style="green",
+            )
+        )
         self._conversation.write(Text("Ready. Send a message to begin.", style="green"))
 
         if len(self._providers) == 1:
@@ -568,7 +585,10 @@ class CowcodeApp(App[Any]):
     def _on_approval_answer(self, answer: str | None) -> None:
         """权限审批弹窗回调——把用户选择转成 Outcome 并恢复 Agent。"""
         if answer is None or self._pending_approval is None:
-            if self._pending_approval is not None and not self._pending_approval.respond.done():
+            if (
+                self._pending_approval is not None
+                and not self._pending_approval.respond.done()
+            ):
                 self._pending_approval.respond.set_result(Outcome.DENY_ONCE)
             self._pending_approval = None
             return
@@ -687,9 +707,7 @@ class CowcodeApp(App[Any]):
                         )
                     else:
                         self._conversation.write("")
-                        self._conversation.write(
-                            Text("Cowcode:", style="bold yellow")
-                        )
+                        self._conversation.write(Text("Cowcode:", style="bold yellow"))
                         self._conversation.write(
                             Markdown(f"**❓ {event.ask_user.question}**")
                         )
@@ -745,6 +763,8 @@ async def _amain() -> int:
             config=config,
             registry=registry,
             engine=engine,
+            mcp_server_count=manager.connected_server_count(),
+            mcp_tool_count=len(manager.tools()),
         ).run_async()
     finally:
         await manager.close()
