@@ -20,6 +20,7 @@ from cowcode import __version__
 from cowcode.agent import Agent, ApprovalRequest, AskUserEvent, Phase
 from cowcode.config import Config, ConfigError, ProviderConfig, load_configs
 from cowcode.environment import gather_environment
+from cowcode import mcp as mcp_client
 from cowcode.permission import Engine, Mode, Outcome, new_engine
 from cowcode.prompt import EXECUTE_DIRECTIVE, build_system_prompt
 from cowcode.provider import Provider, create_provider
@@ -205,7 +206,7 @@ class CowcodeApp(App[Any]):
         Binding("escape", "cancel_or_quit", "Cancel/Quit"),
         Binding("ctrl+c", "cancel_or_quit", "Cancel/Quit"),
         Binding("ctrl+t", "toggle_context", "Context"),
-        Binding("shift+tab", "cycle_mode", "Mode"),
+        Binding("ctrl+g", "cycle_mode", "Mode"),
     ]
 
     CSS = """
@@ -508,6 +509,23 @@ class CowcodeApp(App[Any]):
 
         self._input.clear()
 
+        # 处理 /mode
+        if user_text == "/mode":
+            from cowcode.permission import next_mode
+
+            self._mode = next_mode(self._mode)
+            mode_names = {
+                Mode.DEFAULT: "DEFAULT",
+                Mode.ACCEPT_EDITS: "ACCEPT EDITS",
+                Mode.PLAN: "PLAN",
+                Mode.BYPASS: "BYPASS",
+            }
+            self._print_notice(
+                f"已切换到 {mode_names.get(self._mode, str(self._mode))} 模式"
+            )
+            self._update_status_bar()
+            return
+
         # 处理 /plan 和 /do
         if user_text == "/plan":
             self._mode = Mode.PLAN
@@ -518,7 +536,7 @@ class CowcodeApp(App[Any]):
             return
 
         if user_text == "/do":
-            self._mode = Mode.NORMAL
+            self._mode = Mode.DEFAULT
             self._session.append("user", EXECUTE_DIRECTIVE)
             self._print_notice("已切回正常模式，开始按计划执行。")
             self._update_status_bar()
@@ -698,16 +716,16 @@ class CowcodeApp(App[Any]):
             self._conversation.write(Markdown(self._full_response))
 
 
-def main() -> None:
-    """cowcode 命令入口。"""
+async def _amain() -> int:
+    """异步装配 Cowcode 与 MCP 生命周期。"""
     try:
         config, providers = load_configs()
     except FileNotFoundError:
         print("Error: Config file not found: config.yaml. Create config.yaml.")
-        raise SystemExit(1)
+        return 1
     except ConfigError as exc:
         print(f"Error: Invalid config: {exc}")
-        raise SystemExit(1)
+        return 1
 
     import sys
 
@@ -716,9 +734,23 @@ def main() -> None:
     if err is not None:
         print("权限引擎降级:", err, file=sys.stderr)
 
-    CowcodeApp(
-        providers=providers,
-        config=config,
-        registry=new_default_registry(),
-        engine=engine,
-    ).run()
+    registry = new_default_registry()
+    mcp_config = mcp_client.load_config(root)
+    manager = await mcp_client.new_manager(mcp_config, version=__version__)
+    try:
+        for remote_tool in manager.tools():
+            registry.register(remote_tool)
+        await CowcodeApp(
+            providers=providers,
+            config=config,
+            registry=registry,
+            engine=engine,
+        ).run_async()
+    finally:
+        await manager.close()
+    return 0
+
+
+def main() -> None:
+    """cowcode 命令入口。"""
+    raise SystemExit(asyncio.run(_amain()))

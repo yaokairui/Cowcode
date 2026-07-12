@@ -104,14 +104,21 @@ def check(
     call: Any,
     read_only: bool,
 ) -> tuple[Decision, str]:
-    """前四层判定流水线：黑名单→沙箱→规则→模式兜底。"""
+    """前四层判定流水线：黑名单→沙箱→规则→模式兜底。
+
+    BYPASS 模式下仅过黑名单，其余全部放行。
+    """
     cat = _categorize(getattr(call, "name", "") or "", read_only)
     friendly = _friendly_name(getattr(call, "name", "") or "")
     target, is_file, ok = _extract_target(call)
 
-    # ① 黑名单（仅 EXEC）
+    # ① 黑名单（所有模式强制，包括 BYPASS）
     if cat == Category.EXEC and target and hits_blacklist(target):
         return Decision.DENY, f"命中危险命令黑名单：{target[:120]}"
+
+    # BYPASS：跳过沙箱/规则/兜底，直接放行除黑名单外的所有操作
+    if mode == Mode.BYPASS:
+        return Decision.ALLOW, ""
 
     # ② 沙箱（仅文件类）
     if is_file:
