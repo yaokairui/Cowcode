@@ -8,6 +8,8 @@ providers:
     model: agnes-2.0-flash
     base_url: https://apihub.agnes-ai.com/v1
     api_key: env:AGNES_API_KEY
+    # context_window 单位 token，可选；未配置时按 protocol 默认（anthropic 200000、openai 128000）。
+    context_window: 128000
 
 # Optional: custom system prompt (leave empty for default)
 system_prompt: ""

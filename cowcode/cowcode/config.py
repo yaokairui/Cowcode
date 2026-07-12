@@ -9,7 +9,19 @@ from typing import Any
 
 import yaml
 
-__all__ = ["Config", "ProviderConfig", "load", "load_configs", "ConfigError"]
+from cowcode.protocol_defaults import (
+    DEFAULT_ANTHROPIC_CONTEXT_WINDOW,
+    DEFAULT_OPENAI_CONTEXT_WINDOW,
+)
+
+__all__ = [
+    "Config",
+    "ProviderConfig",
+    "load",
+    "load_configs",
+    "ConfigError",
+    "effective_context_window",
+]
 
 
 class ConfigError(Exception):
@@ -33,6 +45,7 @@ class ProviderConfig:
     api_key: str
     base_url: str | None = None
     thinking: bool = False
+    context_window: int = 0
 
     def __post_init__(self) -> None:
         if self.protocol not in VALID_PROTOCOLS:
@@ -55,14 +68,26 @@ class Config:
             raise ConfigError("At least one provider must be configured")
 
 
+def effective_context_window(provider: ProviderConfig) -> int:
+    """返回 provider 有效上下文窗口。"""
+
+    if provider.context_window > 0:
+        return provider.context_window
+    if provider.protocol == "openai":
+        return DEFAULT_OPENAI_CONTEXT_WINDOW
+    return DEFAULT_ANTHROPIC_CONTEXT_WINDOW
+
+
 def load_configs(path: str = "config.yaml") -> tuple[Config, list[ProviderConfig]]:
     """Load config for existing Cowcode callers."""
+
     config = load(path)
     return config, config.providers
 
 
 def load(path: str = "config.yaml") -> Config:
     """Load and validate configuration from a YAML file."""
+
     config_path = _resolve_config_path(path)
     try:
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
@@ -76,9 +101,7 @@ def load(path: str = "config.yaml") -> Config:
 
     providers_raw = raw.get("providers", [])
     if not isinstance(providers_raw, list) or not providers_raw:
-        raise ConfigError(
-            "No providers configured. Add at least one 'providers' entry."
-        )
+        raise ConfigError("No providers configured. Add at least one 'providers' entry.")
 
     provider_configs: list[ProviderConfig] = []
     for index, provider_raw in enumerate(providers_raw):
@@ -122,11 +145,13 @@ def _provider_from_dict(raw: dict[str, Any], provider_number: int) -> ProviderCo
         api_key=api_key,
         base_url=str(base_url) if base_url else None,
         thinking=bool(raw.get("thinking", False)),
+        context_window=int(raw.get("context_window", 0) or 0),
     )
 
 
 def _resolve_api_key(value: str, provider_number: int) -> str:
     """Resolve api_key literals and env:NAME / ${NAME} references."""
+
     if value.startswith("env:"):
         env_name = value[4:].strip()
         if not env_name:

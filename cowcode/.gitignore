@@ -24,3 +24,6 @@ Thumbs.db
 dist/
 build/
 *.egg-info/
+
+# Session spill files
+.mewcode/sessions/

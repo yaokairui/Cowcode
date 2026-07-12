@@ -17,15 +17,22 @@ from textual.widgets import Footer, OptionList, RichLog, Static, TextArea
 from textual.widgets._option_list import Option
 
 from cowcode import __version__
-from cowcode.agent import Agent, ApprovalRequest, AskUserEvent, Phase
-from cowcode.config import Config, ConfigError, ProviderConfig, load_configs
+from cowcode.agent import Agent, ApprovalRequest, AskUserEvent, CompactEvent, CompactPhase, Phase
+from cowcode.config import Config, ConfigError, ProviderConfig, effective_context_window, load_configs
 from cowcode.environment import gather_environment
 from cowcode import mcp as mcp_client
 from cowcode.permission import Engine, Mode, Outcome, new_engine
 from cowcode.prompt import EXECUTE_DIRECTIVE, build_system_prompt
 from cowcode.provider import Provider, create_provider
+from cowcode.runtime import SessionRuntime
 from cowcode.session import Session
 from cowcode.tool import Registry, new_default_registry, truncate_text
+from cowcode.compact import (
+    AutoCompactTrackingState,
+    ContentReplacementState,
+    RecoveryState,
+    new_session_context,
+)
 
 __all__ = ["CowcodeApp", "main"]
 
@@ -52,6 +59,18 @@ def _compact_tok(n: int) -> str:
 
 def _format_mcp_status(server_count: int, tool_count: int) -> str:
     return f"Connected to {server_count} MCP server(s), {tool_count} tools registered"
+
+
+def format_compact_notice(event: CompactEvent) -> str:
+    """统一格式化压缩状态提示。"""
+
+    if event.phase == CompactPhase.BEFORE_AUTO:
+        return "正在压缩上下文..."
+    if event.phase == CompactPhase.BEFORE_EMERGENCY:
+        return "上下文撞墙，自动压缩中..."
+    if event.err is not None:
+        return f"压缩失败：{event.err}"
+    return f"已压缩，token 从 {event.before} 降至 {event.after}"
 
 
 class ToolDisplay:
@@ -278,6 +297,7 @@ class CowcodeApp(App[Any]):
         engine: Engine | None = None,
         mcp_server_count: int = 0,
         mcp_tool_count: int = 0,
+        runtime: SessionRuntime | None = None,
     ) -> None:
         super().__init__()
         self._providers = providers
@@ -288,6 +308,13 @@ class CowcodeApp(App[Any]):
         self._mcp_tool_count = mcp_tool_count
         self._selected_provider: ProviderConfig | None = None
         self._provider: Provider | None = None
+        self._agent: Agent | None = None
+        self._runtime = runtime or SessionRuntime(
+            replacement=ContentReplacementState(),
+            recovery=RecoveryState(),
+            auto_tracking=AutoCompactTrackingState(),
+            session=new_session_context(str(Path.cwd())),
+        )
         self._session: Session | None = None
         self._full_response = ""
         self._timer_handle: Timer | None = None
@@ -398,6 +425,8 @@ class CowcodeApp(App[Any]):
         self._selected_provider = provider_config
         self._session = Session()
         self._provider = create_provider(provider_config)
+        self._runtime.context_window = effective_context_window(provider_config)
+        self._agent = None
         self._mode = self._engine.start_mode if self._engine else Mode.DEFAULT
         self._update_status_bar()
         self._input.focus()
@@ -406,6 +435,27 @@ class CowcodeApp(App[Any]):
         if provider_index is None:
             return
         self._select_provider(self._providers[int(provider_index)])
+
+    def _ensure_agent(self) -> Agent | None:
+        if self._provider is None:
+            return None
+        environment = gather_environment(
+            version=__version__, model=self._selected_provider.model
+        ).render()
+        if self._agent is None or self._environment_changed(environment):
+            self._agent = Agent(
+                self._provider,
+                self._tool_registry,
+                system_prompt=build_system_prompt(self._config.system_prompt),
+                environment=environment,
+                engine=self._engine,
+                runtime=self._runtime,
+            )
+        return self._agent
+
+    def _environment_changed(self, environment: str) -> bool:
+        agent = self._agent
+        return agent is None or getattr(agent, "_environment", "") != environment
 
     def _update_status_bar(self) -> None:
         if self._selected_provider is None:
@@ -492,6 +542,64 @@ class CowcodeApp(App[Any]):
             Text("  -> " + summary.replace("\n", "\n     "), style=style)
         )
 
+    async def _handle_command(self, command: str) -> None:
+        """处理内置斜杠命令，不写入对话历史。"""
+
+        self._input.clear()
+        if command == "/exit":
+            self.exit()
+            return
+        if command == "/mode":
+            from cowcode.permission import next_mode
+
+            self._mode = next_mode(self._mode)
+            self._print_notice("已切换权限模式。")
+            self._update_status_bar()
+            return
+        if command == "/plan":
+            self._mode = Mode.PLAN
+            self._print_notice("已进入计划模式（只读工具），产出计划后请用 /do 批准执行。")
+            self._update_status_bar()
+            return
+        if command == "/do":
+            if self._session is None:
+                self._print_error("Not connected to a provider.")
+                return
+            self._mode = Mode.DEFAULT
+            self._session.append("user", EXECUTE_DIRECTIVE)
+            self._print_notice("已切回正常模式，开始按计划执行。")
+            self._update_status_bar()
+            self._start_agent_run(self._mode)
+            return
+        if command == "/compact":
+            await self._handle_compact_command()
+            return
+        self._print_notice("未知命令: " + command + "，可用命令: /exit /mode /plan /do /compact")
+
+    async def _handle_compact_command(self) -> None:
+        if self._session is None or self._provider is None:
+            self._print_error("Not connected to a provider.")
+            return
+        agent = self._ensure_agent()
+        if agent is None:
+            self._print_error("Not connected to a provider.")
+            return
+        defs = (
+            self._tool_registry.read_only_definitions()
+            if self._mode == Mode.PLAN
+            else self._tool_registry.definitions()
+        )
+        try:
+            before, after = await agent.run_force_compact(self._session, defs)
+        except Exception as exc:
+            self._print_notice(format_compact_notice(CompactEvent(CompactPhase.AFTER_AUTO, err=exc)))
+            return
+        self._print_notice(
+            format_compact_notice(
+                CompactEvent(CompactPhase.AFTER_AUTO, before=before, after=after)
+            )
+        )
+
     async def _handle_send(self) -> None:
         """提交当前输入，并消费 Agent 事件流。"""
         if self._is_streaming:
@@ -520,50 +628,18 @@ class CowcodeApp(App[Any]):
             self.exit()
             return
 
+        if user_text.startswith("/"):
+            await self._handle_command(user_text)
+            return
+
         if self._session is None or self._provider is None:
             self._print_error("Not connected to a provider.")
             return
 
         self._input.clear()
-
-        # 处理 /mode
-        if user_text == "/mode":
-            from cowcode.permission import next_mode
-
-            self._mode = next_mode(self._mode)
-            mode_names = {
-                Mode.DEFAULT: "DEFAULT",
-                Mode.ACCEPT_EDITS: "ACCEPT EDITS",
-                Mode.PLAN: "PLAN",
-                Mode.BYPASS: "BYPASS",
-            }
-            self._print_notice(
-                f"已切换到 {mode_names.get(self._mode, str(self._mode))} 模式"
-            )
-            self._update_status_bar()
-            return
-
-        # 处理 /plan 和 /do
-        if user_text == "/plan":
-            self._mode = Mode.PLAN
-            self._print_notice(
-                "已进入计划模式（只读工具），产出计划后请用 /do 批准执行。"
-            )
-            self._update_status_bar()
-            return
-
-        if user_text == "/do":
-            self._mode = Mode.DEFAULT
-            self._session.append("user", EXECUTE_DIRECTIVE)
-            self._print_notice("已切回正常模式，开始按计划执行。")
-            self._update_status_bar()
-            # 走启动流程
-        else:
-            # 普通文本
-            self._context_header.set_context(user_text)
-            self._print_user(user_text)
-            self._session.append("user", user_text)
-
+        self._context_header.set_context(user_text)
+        self._print_user(user_text)
+        self._session.append("user", user_text)
         self._start_agent_run(self._mode)
 
     def _on_user_answer(self, answer: str | None) -> None:
@@ -618,16 +694,10 @@ class CowcodeApp(App[Any]):
         self._is_streaming = True
         self._iter = 0
 
-        environment = gather_environment(
-            version=__version__, model=self._selected_provider.model
-        ).render()
-        agent = Agent(
-            self._provider,
-            self._tool_registry,
-            system_prompt=build_system_prompt(self._config.system_prompt),
-            environment=environment,
-            engine=self._engine,
-        )
+        agent = self._ensure_agent()
+        if agent is None:
+            self._print_error("Not connected to a provider.")
+            return
         self.run_worker(self._consume_agent_events(agent, mode), exclusive=True)
 
     async def _consume_agent_events(self, agent: Agent, mode: Mode) -> None:
@@ -637,6 +707,9 @@ class CowcodeApp(App[Any]):
                 if event.err is not None:
                     self._print_error(str(event.err))
                     break
+                if event.compact is not None:
+                    self._print_notice(format_compact_notice(event.compact))
+                    continue
                 if event.text:
                     self._full_response += event.text
                     self._set_streaming_response(self._full_response)
@@ -763,8 +836,12 @@ async def _amain() -> int:
             config=config,
             registry=registry,
             engine=engine,
-            mcp_server_count=manager.connected_server_count(),
-            mcp_tool_count=len(manager.tools()),
+            runtime=SessionRuntime(
+                replacement=ContentReplacementState(),
+                recovery=RecoveryState(),
+                auto_tracking=AutoCompactTrackingState(),
+                session=new_session_context(root),
+            ),
         ).run_async()
     finally:
         await manager.close()

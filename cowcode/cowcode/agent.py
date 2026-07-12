@@ -5,11 +5,28 @@ from __future__ import annotations
 import asyncio
 import json as _json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import AsyncIterator
 
+from cowcode.compact import (
+    AutoCompactTrackingState,
+    ContentReplacementState,
+    RecoveryState,
+    TriggerKind,
+    manage_context,
+    new_session_context,
+)
+from cowcode.compact.compact import ManageInput
+from cowcode.compact.const import (
+    AUTO_SAFETY_MARGIN,
+    MANUAL_SAFETY_MARGIN,
+    SUMMARY_RESERVE,
+)
+from cowcode.compact.token import estimate_tokens, usage_anchor
 from cowcode.permission import Decision, Engine, Mode, Outcome
 from cowcode.prompt import PLAN_REMINDER_INTERVAL, plan_reminder
-from cowcode.provider import Provider, Request, SystemPrompt
+from cowcode.provider import Provider, PromptTooLongError, Request, SystemPrompt
+from cowcode.runtime import SessionRuntime
 from cowcode.session import Session, ToolCall, ToolDefinition, ToolResult, Usage
 from cowcode.tool import DEFAULT_TIMEOUT, Registry, truncate_text
 
@@ -38,6 +55,26 @@ class Event:
     err: Exception | None = None
     ask_user: "AskUserEvent | None" = None
     approval: "ApprovalRequest | None" = None
+    compact: "CompactEvent | None" = None
+
+
+class CompactPhase:
+    """压缩生命周期阶段。"""
+
+    BEFORE_AUTO = "before_auto"
+    AFTER_AUTO = "after_auto"
+    BEFORE_EMERGENCY = "before_emergency"
+    AFTER_EMERGENCY = "after_emergency"
+
+
+@dataclass
+class CompactEvent:
+    """上下文压缩状态事件。"""
+
+    phase: str
+    before: int = 0
+    after: int = 0
+    err: Exception | None = None
 
 
 @dataclass
@@ -84,7 +121,7 @@ class _RoundState:
     text: str = ""
     calls: list[ToolCall] = field(default_factory=list)
     usage: Usage | None = None
-    ok: bool = True
+    err: Exception | None = None
 
 
 @dataclass
@@ -107,12 +144,22 @@ class Agent:
         system_prompt: str = "",
         environment: str = "",
         engine: Engine | None = None,
+        runtime: SessionRuntime | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
         self._system_prompt = system_prompt
         self._environment = environment
         self._engine = engine
+        if runtime is None:
+            runtime = SessionRuntime(
+                replacement=ContentReplacementState(),
+                recovery=RecoveryState(),
+                auto_tracking=AutoCompactTrackingState(),
+                session=new_session_context("."),
+            )
+        self._runtime = runtime
+        self._run_lock = asyncio.Lock()
 
     async def run(
         self,
@@ -124,94 +171,135 @@ class Agent:
         if cancel is None:
             cancel = asyncio.Event()
 
-        # 按 mode 确定工具集；稳定系统提示跨模式不变
-        if mode == Mode.PLAN:
-            definitions = self._registry.read_only_definitions()
-        else:
-            definitions = self._registry.definitions()
+        async with self._run_lock:
+            unknown_run = 0
 
-        unknown_run = 0
+            for it in range(1, MAX_ITERATIONS + 1):
+                yield Event(iter=it)
 
-        for it in range(1, MAX_ITERATIONS + 1):
-            yield Event(iter=it)
-
-            if cancel.is_set():
-                await self._finish_cancelled(session)
-                return
-
-            reminder = ""
-            if mode == Mode.PLAN:
-                full = it == 1 or (it - 1) % PLAN_REMINDER_INTERVAL == 0
-                reminder = plan_reminder(full)
-
-            # ----- 一轮流式收集 -----
-            round_state = _RoundState()
-            async for event in self._stream_once(
-                session, definitions, reminder, cancel, round_state
-            ):
-                yield event
-
-            text = round_state.text
-            calls = round_state.calls
-            usage = round_state.usage
-            if not round_state.ok:
                 if cancel.is_set():
                     await self._finish_cancelled(session)
                     return
-                self._ensure_assistant_tail(session, NOTICE_STREAM_ERR)
-                yield Event(notice=NOTICE_STREAM_ERR)
-                yield Event(done=True)
-                return
 
-            # ----- 用量 -----
-            if usage is not None:
-                yield Event(usage=usage)
+                definitions = (
+                    self._registry.read_only_definitions()
+                    if mode == Mode.PLAN
+                    else self._registry.definitions()
+                )
+                reminder = ""
+                if mode == Mode.PLAN:
+                    full = it == 1 or (it - 1) % PLAN_REMINDER_INTERVAL == 0
+                    reminder = plan_reminder(full)
 
-            # ----- 无工具：自然完成 -----
-            if not calls:
-                final_text = self._ensure_final(text)
-                if not text.strip() and final_text != text:
-                    yield Event(text=final_text)
-                session.append("assistant", final_text)
-                yield Event(done=True)
-                return
+                async with self._runtime.lock:
+                    anchor = self._runtime.usage_anchor
+                    anchor_len = self._runtime.anchor_msg_len
+                    context_window = self._runtime.context_window
+                estimated = estimate_tokens(anchor, session.get_history(), anchor_len)
+                will_compact = estimated >= context_window - SUMMARY_RESERVE - AUTO_SAFETY_MARGIN
+                manage_input = ManageInput(
+                    conv=session, provider=self._provider, context_window=context_window,
+                    tool_defs=definitions, replacement=self._runtime.replacement,
+                    recovery=self._runtime.recovery, auto_tracking=self._runtime.auto_tracking,
+                    session=self._runtime.session, usage_anchor=anchor,
+                    anchor_msg_len=anchor_len, estimated_token=estimated, trigger=TriggerKind.AUTO,
+                )
+                if will_compact:
+                    yield Event(compact=CompactEvent(CompactPhase.BEFORE_AUTO))
+                try:
+                    manage_output = await manage_context(manage_input)
+                except Exception as exc:
+                    if will_compact:
+                        yield Event(compact=CompactEvent(CompactPhase.AFTER_AUTO, before=estimated, after=0, err=exc))
+                    yield Event(err=exc)
+                    return
+                if will_compact:
+                    yield Event(compact=CompactEvent(CompactPhase.AFTER_AUTO, before=manage_output.before_tokens, after=manage_output.after_tokens))
 
-            # ----- 有工具：写入历史 -----
-            session.add_assistant_with_tool_calls(text, calls)
+                round_state = _RoundState()
+                async for event in self._stream_once(session, definitions, reminder, cancel, round_state):
+                    yield event
 
-            # 统计连续未知工具
-            if self._all_unknown(calls):
-                unknown_run += 1
-            else:
-                unknown_run = 0
+                text = round_state.text
+                calls = round_state.calls
+                usage = round_state.usage
+                err = round_state.err
 
-            # 保序分批执行
-            execution_state = _ExecutionState()
-            async for event in self._execute_batched(calls, mode, cancel, execution_state):
-                yield event
+                if isinstance(err, PromptTooLongError):
+                    yield Event(compact=CompactEvent(CompactPhase.BEFORE_EMERGENCY))
+                    emergency_input = ManageInput(
+                        conv=session, provider=self._provider, context_window=context_window,
+                        tool_defs=definitions, replacement=self._runtime.replacement,
+                        recovery=self._runtime.recovery, auto_tracking=self._runtime.auto_tracking,
+                        session=self._runtime.session, usage_anchor=anchor,
+                        anchor_msg_len=anchor_len, estimated_token=estimated, trigger=TriggerKind.EMERGENCY,
+                    )
+                    try:
+                        emergency_output = await manage_context(emergency_input)
+                    except Exception as exc:
+                        yield Event(compact=CompactEvent(CompactPhase.AFTER_EMERGENCY, before=estimated, after=0, err=exc))
+                        yield Event(err=exc)
+                        return
+                    yield Event(compact=CompactEvent(CompactPhase.AFTER_EMERGENCY, before=emergency_output.before_tokens, after=emergency_output.after_tokens))
+                    async with self._runtime.lock:
+                        self._runtime.usage_anchor = 0
+                        self._runtime.anchor_msg_len = 0
+                    if estimate_tokens(0, session.get_history(), 0) >= context_window - MANUAL_SAFETY_MARGIN:
+                        yield Event(err=err)
+                        return
+                    round_state = _RoundState()
+                    async for event in self._stream_once(session, definitions, reminder, cancel, round_state):
+                        yield event
+                    text = round_state.text
+                    calls = round_state.calls
+                    usage = round_state.usage
+                    err = round_state.err
 
-            session.add_tool_results(execution_state.results)
+                if err is not None:
+                    if cancel.is_set():
+                        await self._finish_cancelled(session)
+                        return
+                    self._ensure_assistant_tail(session, NOTICE_STREAM_ERR)
+                    yield Event(notice=NOTICE_STREAM_ERR)
+                    yield Event(done=True)
+                    return
 
-            # AskUserQuestion 暂停：退出循环，等待 CLI 以回答重启
-            if execution_state.paused_for_user:
-                return
+                if usage is not None:
+                    async with self._runtime.lock:
+                        self._runtime.usage_anchor = usage_anchor(usage)
+                        self._runtime.anchor_msg_len = session.length()
+                    yield Event(usage=usage)
 
-            # 取消：最高优先级终止
-            if not execution_state.completed:
-                self._ensure_assistant_tail(session, "（已取消）")
-                return
+                if not calls:
+                    final_text = self._ensure_final(text)
+                    if not text.strip() and final_text != text:
+                        yield Event(text=final_text)
+                    session.append("assistant", final_text)
+                    yield Event(done=True)
+                    return
 
-            # 连续未知工具停止
-            if unknown_run >= MAX_UNKNOWN_RUN:
-                yield Event(notice=NOTICE_UNKNOWN_TOOLS)
-                self._ensure_assistant_tail(session, NOTICE_UNKNOWN_TOOLS)
-                yield Event(done=True)
-                return
+                session.add_assistant_with_tool_calls(text, calls)
+                unknown_run = unknown_run + 1 if self._all_unknown(calls) else 0
 
-        # 循环走完——触达迭代上限
-        yield Event(notice=NOTICE_MAX_ITER)
-        self._ensure_assistant_tail(session, NOTICE_MAX_ITER)
-        yield Event(done=True)
+                execution_state = _ExecutionState()
+                async for event in self._execute_batched(calls, mode, cancel, execution_state):
+                    yield event
+                session.add_tool_results(execution_state.results)
+
+                if execution_state.paused_for_user:
+                    return
+                if not execution_state.completed:
+                    self._ensure_assistant_tail(session, "（已取消）")
+                    return
+                if unknown_run >= MAX_UNKNOWN_RUN:
+                    yield Event(notice=NOTICE_UNKNOWN_TOOLS)
+                    self._ensure_assistant_tail(session, NOTICE_UNKNOWN_TOOLS)
+                    yield Event(done=True)
+                    return
+
+            yield Event(notice=NOTICE_MAX_ITER)
+            self._ensure_assistant_tail(session, NOTICE_MAX_ITER)
+            yield Event(done=True)
 
     # ---------- 内部 ----------
 
@@ -236,11 +324,10 @@ class Agent:
         try:
             async for ev in self._provider.stream(request):
                 if cancel.is_set():
-                    state.ok = False
+                    state.err = asyncio.CancelledError()
                     return
                 if ev.err is not None:
-                    state.ok = False
-                    yield Event(err=ev.err)
+                    state.err = ev.err
                     return
                 if ev.usage is not None:
                     state.usage = ev.usage
@@ -250,12 +337,11 @@ class Agent:
                     state.text += ev.text
                     yield Event(text=ev.text)
         except Exception as exc:
-            state.ok = False
-            yield Event(err=exc)
+            state.err = exc
             return
 
         if cancel.is_set():
-            state.ok = False
+            state.err = asyncio.CancelledError()
 
     async def _execute_batched(
         self,
@@ -358,6 +444,7 @@ class Agent:
 
                     async def _gather_one(k: int) -> None:
                         results[k] = await self._run_one(calls[k])
+                        await self._record_read_file(calls[k], results[k])
 
                     await asyncio.gather(*(_gather_one(k) for k in gather_indices))
                 for k in range(i, j):
@@ -492,6 +579,7 @@ class Agent:
                     # START 还没发 — 补发
                     pass  # START 已在上方发出
                 results[i] = await self._run_one(call)
+                await self._record_read_file(call, results[i])
                 yield Event(
                     tool=ToolEvent(
                         name=call.name,
@@ -546,6 +634,61 @@ class Agent:
                 content=f"Tool {call.name} timed out after {DEFAULT_TIMEOUT:.1f}s",
                 is_error=True,
             )
+
+    async def run_force_compact(
+        self,
+        session: Session,
+        tool_defs: list[ToolDefinition] | None = None,
+    ) -> tuple[int, int]:
+        """手动触发一次上下文压缩。"""
+
+        async with self._run_lock:
+            if tool_defs is None:
+                tool_defs = self._registry.definitions()
+            async with self._runtime.lock:
+                anchor = self._runtime.usage_anchor
+                anchor_len = self._runtime.anchor_msg_len
+                context_window = self._runtime.context_window
+            estimated = estimate_tokens(anchor, session.get_history(), anchor_len)
+            out = await manage_context(
+                ManageInput(
+                    conv=session,
+                    provider=self._provider,
+                    context_window=context_window,
+                    tool_defs=tool_defs,
+                    replacement=self._runtime.replacement,
+                    recovery=self._runtime.recovery,
+                    auto_tracking=self._runtime.auto_tracking,
+                    session=self._runtime.session,
+                    usage_anchor=anchor,
+                    anchor_msg_len=anchor_len,
+                    estimated_token=estimated,
+                    trigger=TriggerKind.MANUAL,
+                )
+            )
+            async with self._runtime.lock:
+                self._runtime.usage_anchor = 0
+                self._runtime.anchor_msg_len = 0
+            return out.before_tokens, out.after_tokens
+
+    async def _record_read_file(self, call: ToolCall, result: ToolResult | None) -> None:
+        """ReadFile 成功后记录纯净文件内容。"""
+
+        if result is None or result.is_error or call.name != "read_file":
+            return
+        try:
+            data = _json.loads(call.input or "{}")
+        except Exception:
+            return
+        path_value = data.get("path") if isinstance(data, dict) else None
+        if not isinstance(path_value, str) or not path_value:
+            return
+        try:
+            abs_path = Path(path_value).resolve()
+            raw = await asyncio.to_thread(abs_path.read_bytes)
+        except OSError:
+            return
+        self._runtime.recovery.record_file(str(abs_path), raw.decode("utf-8", errors="replace"))
 
     # ---------- 辅助 ----------
 

@@ -8,11 +8,21 @@ from typing import AsyncIterator
 
 from cowcode.session import Message, StreamEvent, ToolDefinition
 
-__all__ = ["Provider", "ProviderError", "Request", "SystemPrompt"]
+__all__ = [
+    "Provider",
+    "ProviderError",
+    "PromptTooLongError",
+    "Request",
+    "SystemPrompt",
+]
 
 
 class ProviderError(Exception):
     """Provider 调用失败时抛出的可读错误。"""
+
+
+class PromptTooLongError(Exception):
+    """Provider 上报上下文超出窗口时统一使用的哨兵异常。"""
 
 
 @dataclass(frozen=True)

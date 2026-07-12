@@ -1,0 +1,4 @@
+"""Provider protocol context-window defaults."""
+
+DEFAULT_ANTHROPIC_CONTEXT_WINDOW = 200000
+DEFAULT_OPENAI_CONTEXT_WINDOW = 128000

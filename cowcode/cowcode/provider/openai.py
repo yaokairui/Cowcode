@@ -9,7 +9,7 @@ from typing import Any, AsyncIterator
 import httpx
 
 from cowcode.config import ProviderConfig
-from cowcode.provider.base import Provider, ProviderError, Request
+from cowcode.provider.base import Provider, ProviderError, PromptTooLongError, Request
 from cowcode.session import StreamEvent, ToolCall, ToolDefinition, Usage
 
 __all__ = ["OpenAIProvider"]
@@ -100,6 +100,11 @@ class OpenAIProvider(Provider):
                     )
                 yield StreamEvent(done=True)
             except httpx.HTTPStatusError as exc:
+                if _is_prompt_too_long(exc):
+                    wrapped = PromptTooLongError("openai prompt too long")
+                    wrapped.__cause__ = exc
+                    yield StreamEvent(err=wrapped)
+                    return
                 raise ProviderError(self._format_http_error(exc)) from exc
             except httpx.RequestError as exc:
                 raise ProviderError(
@@ -229,3 +234,12 @@ class OpenAIProvider(Provider):
         if body:
             return f"OpenAI API error {exc.response.status_code}: {body}"
         return f"OpenAI API error {exc.response.status_code}"
+
+
+def _is_prompt_too_long(exc: httpx.HTTPStatusError) -> bool:
+    text = exc.response.text.lower()
+    return exc.response.status_code == 400 and (
+        "context_length_exceeded" in text
+        or "maximum context length" in text
+        or "context_length" in text
+    )
