@@ -76,7 +76,9 @@ def offload_and_snip(
             content = result.content or ""
             tool_use_id = result.tool_call_id
             if state.is_seen(tool_use_id):
-                result.content = state.decide_once(tool_use_id, content, lambda: ("kept", ""))
+                result.content = state.decide_once(
+                    tool_use_id, content, lambda: ("kept", "")
+                )
                 continue
             candidates.append((index, _utf8_len(content), content, len(candidates)))
 
@@ -112,10 +114,14 @@ def offload_and_snip(
                     spill_path = str(Path(session.spill_dir) / id_)
                     return (
                         "replaced",
-                        build_preview(_utf8_len(original), _head_preview(original), spill_path),
+                        build_preview(
+                            _utf8_len(original), _head_preview(original), spill_path
+                        ),
                     )
 
                 result.content = state.decide_once(tool_use_id, content, decide)
             else:
-                result.content = state.decide_once(tool_use_id, content, lambda: ("kept", ""))
+                result.content = state.decide_once(
+                    tool_use_id, content, lambda: ("kept", "")
+                )
     return out

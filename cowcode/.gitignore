@@ -26,4 +26,4 @@ build/
 *.egg-info/
 
 # Session spill files
-.mewcode/sessions/
+.cowcode/sessions/

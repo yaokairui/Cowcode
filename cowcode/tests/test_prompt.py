@@ -35,6 +35,18 @@ def test_custom_prompt_fills_optional_slot() -> None:
     assert text.endswith("Always answer in Chinese.")
 
 
+def test_instructions_and_memory_fill_optional_slots() -> None:
+    text = build_system_prompt("", "Project rules", "Remembered facts")
+    assert "Project rules" in text
+    assert "Remembered facts" in text
+
+
+def test_empty_instructions_and_memory_are_skipped() -> None:
+    text = build_system_prompt("", "", "")
+    assert "custom_instructions" not in text
+    assert "long_term_memory" not in text
+
+
 def test_environment_renders_separately() -> None:
     rendered = Environment(
         working_dir="/repo",

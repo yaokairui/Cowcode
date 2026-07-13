@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from cowcode.conversation import Conversation
-from cowcode.session import Session
+from cowcode.session import Message, Session
 
 
 def test_conversation_preserves_message_order_and_returns_copy() -> None:
@@ -22,7 +22,39 @@ def test_conversation_preserves_message_order_and_returns_copy() -> None:
     assert len(conversation) == 2
 
 
-def test_session_last_role() -> None:
+def test_conversation_callbacks() -> None:
+    appended: list[Message] = []
+    replaced: list[list[Message]] = []
+    conversation = Conversation(on_append=appended.append, on_replace=replaced.append)
+
+    conversation.add_user("hello")
+    conversation.add_assistant("hi")
+    conversation.replace_messages([Message(role="user", content="new")])
+
+    assert [(msg.role, msg.content) for msg in appended] == [
+        ("user", "hello"),
+        ("assistant", "hi"),
+    ]
+    assert [[(msg.role, msg.content) for msg in batch] for batch in replaced] == [
+        [("user", "new")]
+    ]
+
+
+def test_session_callbacks() -> None:
+    appended: list[Message] = []
+    replaced: list[list[Message]] = []
+    session = Session(on_append=appended.append, on_replace=replaced.append)
+
+    session.append("user", "hello")
+    session.append("assistant", "hi")
+    session.replace_messages([Message(role="assistant", content="summary")])
+
+    assert [(msg.role, msg.content) for msg in appended] == [
+        ("user", "hello"),
+        ("assistant", "hi"),
+    ]
+    assert replaced[0][0].content == "summary"
+
     """空历史 + 各角色填充后的 last_role 断言。"""
     session = Session()
     assert session.last_role() == ""

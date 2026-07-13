@@ -26,8 +26,16 @@ from cowcode.compact.token import estimate_tokens, usage_anchor
 from cowcode.permission import Decision, Engine, Mode, Outcome
 from cowcode.prompt import PLAN_REMINDER_INTERVAL, plan_reminder
 from cowcode.provider import Provider, PromptTooLongError, Request, SystemPrompt
+from cowcode.memory import Manager as MemoryManager
 from cowcode.runtime import SessionRuntime
-from cowcode.session import Session, ToolCall, ToolDefinition, ToolResult, Usage
+from cowcode.session import (
+    Message,
+    Session,
+    ToolCall,
+    ToolDefinition,
+    ToolResult,
+    Usage,
+)
 from cowcode.tool import DEFAULT_TIMEOUT, Registry, truncate_text
 
 # ----- 常量 -----
@@ -145,6 +153,7 @@ class Agent:
         environment: str = "",
         engine: Engine | None = None,
         runtime: SessionRuntime | None = None,
+        memory_manager: MemoryManager | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -159,6 +168,7 @@ class Agent:
                 session=new_session_context("."),
             )
         self._runtime = runtime
+        self._memory_manager = memory_manager
         self._run_lock = asyncio.Lock()
 
     async def run(
@@ -196,13 +206,22 @@ class Agent:
                     anchor_len = self._runtime.anchor_msg_len
                     context_window = self._runtime.context_window
                 estimated = estimate_tokens(anchor, session.get_history(), anchor_len)
-                will_compact = estimated >= context_window - SUMMARY_RESERVE - AUTO_SAFETY_MARGIN
+                will_compact = (
+                    estimated >= context_window - SUMMARY_RESERVE - AUTO_SAFETY_MARGIN
+                )
                 manage_input = ManageInput(
-                    conv=session, provider=self._provider, context_window=context_window,
-                    tool_defs=definitions, replacement=self._runtime.replacement,
-                    recovery=self._runtime.recovery, auto_tracking=self._runtime.auto_tracking,
-                    session=self._runtime.session, usage_anchor=anchor,
-                    anchor_msg_len=anchor_len, estimated_token=estimated, trigger=TriggerKind.AUTO,
+                    conv=session,
+                    provider=self._provider,
+                    context_window=context_window,
+                    tool_defs=definitions,
+                    replacement=self._runtime.replacement,
+                    recovery=self._runtime.recovery,
+                    auto_tracking=self._runtime.auto_tracking,
+                    session=self._runtime.session,
+                    usage_anchor=anchor,
+                    anchor_msg_len=anchor_len,
+                    estimated_token=estimated,
+                    trigger=TriggerKind.AUTO,
                 )
                 if will_compact:
                     yield Event(compact=CompactEvent(CompactPhase.BEFORE_AUTO))
@@ -210,14 +229,29 @@ class Agent:
                     manage_output = await manage_context(manage_input)
                 except Exception as exc:
                     if will_compact:
-                        yield Event(compact=CompactEvent(CompactPhase.AFTER_AUTO, before=estimated, after=0, err=exc))
+                        yield Event(
+                            compact=CompactEvent(
+                                CompactPhase.AFTER_AUTO,
+                                before=estimated,
+                                after=0,
+                                err=exc,
+                            )
+                        )
                     yield Event(err=exc)
                     return
                 if will_compact:
-                    yield Event(compact=CompactEvent(CompactPhase.AFTER_AUTO, before=manage_output.before_tokens, after=manage_output.after_tokens))
+                    yield Event(
+                        compact=CompactEvent(
+                            CompactPhase.AFTER_AUTO,
+                            before=manage_output.before_tokens,
+                            after=manage_output.after_tokens,
+                        )
+                    )
 
                 round_state = _RoundState()
-                async for event in self._stream_once(session, definitions, reminder, cancel, round_state):
+                async for event in self._stream_once(
+                    session, definitions, reminder, cancel, round_state
+                ):
                     yield event
 
                 text = round_state.text
@@ -228,27 +262,52 @@ class Agent:
                 if isinstance(err, PromptTooLongError):
                     yield Event(compact=CompactEvent(CompactPhase.BEFORE_EMERGENCY))
                     emergency_input = ManageInput(
-                        conv=session, provider=self._provider, context_window=context_window,
-                        tool_defs=definitions, replacement=self._runtime.replacement,
-                        recovery=self._runtime.recovery, auto_tracking=self._runtime.auto_tracking,
-                        session=self._runtime.session, usage_anchor=anchor,
-                        anchor_msg_len=anchor_len, estimated_token=estimated, trigger=TriggerKind.EMERGENCY,
+                        conv=session,
+                        provider=self._provider,
+                        context_window=context_window,
+                        tool_defs=definitions,
+                        replacement=self._runtime.replacement,
+                        recovery=self._runtime.recovery,
+                        auto_tracking=self._runtime.auto_tracking,
+                        session=self._runtime.session,
+                        usage_anchor=anchor,
+                        anchor_msg_len=anchor_len,
+                        estimated_token=estimated,
+                        trigger=TriggerKind.EMERGENCY,
                     )
                     try:
                         emergency_output = await manage_context(emergency_input)
                     except Exception as exc:
-                        yield Event(compact=CompactEvent(CompactPhase.AFTER_EMERGENCY, before=estimated, after=0, err=exc))
+                        yield Event(
+                            compact=CompactEvent(
+                                CompactPhase.AFTER_EMERGENCY,
+                                before=estimated,
+                                after=0,
+                                err=exc,
+                            )
+                        )
                         yield Event(err=exc)
                         return
-                    yield Event(compact=CompactEvent(CompactPhase.AFTER_EMERGENCY, before=emergency_output.before_tokens, after=emergency_output.after_tokens))
+                    yield Event(
+                        compact=CompactEvent(
+                            CompactPhase.AFTER_EMERGENCY,
+                            before=emergency_output.before_tokens,
+                            after=emergency_output.after_tokens,
+                        )
+                    )
                     async with self._runtime.lock:
                         self._runtime.usage_anchor = 0
                         self._runtime.anchor_msg_len = 0
-                    if estimate_tokens(0, session.get_history(), 0) >= context_window - MANUAL_SAFETY_MARGIN:
+                    if (
+                        estimate_tokens(0, session.get_history(), 0)
+                        >= context_window - MANUAL_SAFETY_MARGIN
+                    ):
                         yield Event(err=err)
                         return
                     round_state = _RoundState()
-                    async for event in self._stream_once(session, definitions, reminder, cancel, round_state):
+                    async for event in self._stream_once(
+                        session, definitions, reminder, cancel, round_state
+                    ):
                         yield event
                     text = round_state.text
                     calls = round_state.calls
@@ -261,6 +320,7 @@ class Agent:
                         return
                     self._ensure_assistant_tail(session, NOTICE_STREAM_ERR)
                     yield Event(notice=NOTICE_STREAM_ERR)
+                    yield Event(err=err)
                     yield Event(done=True)
                     return
 
@@ -275,6 +335,7 @@ class Agent:
                     if not text.strip() and final_text != text:
                         yield Event(text=final_text)
                     session.append("assistant", final_text)
+                    self._maybe_update_memory(session)
                     yield Event(done=True)
                     return
 
@@ -282,7 +343,9 @@ class Agent:
                 unknown_run = unknown_run + 1 if self._all_unknown(calls) else 0
 
                 execution_state = _ExecutionState()
-                async for event in self._execute_batched(calls, mode, cancel, execution_state):
+                async for event in self._execute_batched(
+                    calls, mode, cancel, execution_state
+                ):
                     yield event
                 session.add_tool_results(execution_state.results)
 
@@ -671,7 +734,9 @@ class Agent:
                 self._runtime.anchor_msg_len = 0
             return out.before_tokens, out.after_tokens
 
-    async def _record_read_file(self, call: ToolCall, result: ToolResult | None) -> None:
+    async def _record_read_file(
+        self, call: ToolCall, result: ToolResult | None
+    ) -> None:
         """ReadFile 成功后记录纯净文件内容。"""
 
         if result is None or result.is_error or call.name != "read_file":
@@ -688,7 +753,9 @@ class Agent:
             raw = await asyncio.to_thread(abs_path.read_bytes)
         except OSError:
             return
-        self._runtime.recovery.record_file(str(abs_path), raw.decode("utf-8", errors="replace"))
+        self._runtime.recovery.record_file(
+            str(abs_path), raw.decode("utf-8", errors="replace")
+        )
 
     # ---------- 辅助 ----------
 
@@ -703,6 +770,24 @@ class Agent:
         return (
             "Tool results were returned, but the model did not provide a final answer."
         )
+
+    def _maybe_update_memory(self, session: Session) -> None:
+        mem_mgr = self._memory_manager
+        if mem_mgr is None:
+            return
+        history = session.get_history()
+        recent = self._recent_turn(history)
+        self._runtime.turn_count += 1
+        if self._runtime.turn_count % 5 != 0 and not _has_memory_signal(recent):
+            return
+        asyncio.create_task(mem_mgr.update_async(recent))
+
+    @staticmethod
+    def _recent_turn(history: list[Message]) -> list[Message]:
+        for index in range(len(history) - 1, -1, -1):
+            if history[index].role == "user":
+                return history[index:]
+        return history[-2:]
 
     def _ensure_assistant_tail(self, session: Session, fallback: str) -> None:
         """如果最后一条不是 assistant，补一条 fallback 文本，保证角色交替合法。"""
@@ -755,3 +840,10 @@ class Agent:
         if isinstance(options, list) and all(isinstance(o, str) for o in options):
             return str(question), options  # type: ignore[arg-type]
         return str(question), []
+
+
+def _has_memory_signal(messages: list[Message]) -> bool:
+    text = "\n".join(msg.content for msg in messages if msg.role == "user").lower()
+    return any(
+        keyword in text for keyword in ("记住", "记忆", "别忘", "remember", "memo")
+    )

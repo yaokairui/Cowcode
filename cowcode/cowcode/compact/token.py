@@ -18,10 +18,7 @@ def usage_anchor(usage: Usage) -> int:
     """把 provider usage 合并成单一锚点。"""
 
     return int(
-        usage.input_tokens
-        + usage.output_tokens
-        + usage.cache_read
-        + usage.cache_write
+        usage.input_tokens + usage.output_tokens + usage.cache_read + usage.cache_write
     )
 
 

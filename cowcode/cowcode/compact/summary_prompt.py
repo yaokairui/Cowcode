@@ -47,7 +47,9 @@ def serialize_conversation(msgs: list[Message]) -> str:
             lines.append(f"{msg.role}: {msg.content}")
         if msg.role == "assistant" and msg.tool_calls:
             for call in msg.tool_calls:
-                lines.append(f"[call {call.name} id={call.id} args={_json(call.input)}]")
+                lines.append(
+                    f"[call {call.name} id={call.id} args={_json(call.input)}]"
+                )
         if msg.role == "tool":
             for result in msg.tool_results:
                 lines.append(
@@ -59,7 +61,9 @@ def serialize_conversation(msgs: list[Message]) -> str:
 def build_summary_prompt(msgs: list[Message]) -> list[Message]:
     """构造无工具摘要请求消息。"""
 
-    content = SUMMARY_INSTRUCTION + "\n\n[conversation]\n" + serialize_conversation(msgs)
+    content = (
+        SUMMARY_INSTRUCTION + "\n\n[conversation]\n" + serialize_conversation(msgs)
+    )
     return [Message(role="user", content=content)]
 
 

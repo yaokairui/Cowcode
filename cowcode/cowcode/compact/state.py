@@ -6,7 +6,6 @@ import copy
 import logging
 import secrets
 import threading
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -22,25 +21,51 @@ class SessionContext:
     """单进程会话的落盘上下文。"""
 
     session_id: str
+    session_dir: str
     spill_dir: str
 
 
 def _new_session_id() -> str:
     try:
-        suffix = secrets.token_hex(4)
+        suffix = secrets.token_hex(2)
     except Exception as exc:
         _LOG.warning("生成会话随机串失败，使用时间兜底: %s", exc)
-        suffix = f"{time.time_ns() & 0xFFFFFFFF:08x}"
-    return f"{int(time.time())}-{suffix}"
+        suffix = f"{datetime.now().microsecond & 0xFFFF:04x}"
+    return f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{suffix}"
+
+
+def parse_session_time(session_id: str) -> datetime:
+    """从新格式 session ID 解析本地时间。"""
+
+    return datetime.strptime(session_id[:15], "%Y%m%d-%H%M%S")
 
 
 def new_session_context(workspace: str) -> SessionContext:
     """创建会话目录并返回上下文。"""
 
     session_id = _new_session_id()
-    spill_dir = Path(workspace) / ".mewcode" / "sessions" / session_id / "tool-results"
+    session_dir = Path(workspace) / ".cowcode" / "sessions" / session_id
+    spill_dir = session_dir / "tool-results"
     spill_dir.mkdir(parents=True, exist_ok=True)
-    return SessionContext(session_id=session_id, spill_dir=str(spill_dir))
+    return SessionContext(
+        session_id=session_id,
+        session_dir=str(session_dir),
+        spill_dir=str(spill_dir),
+    )
+
+
+def open_session_context(workspace: str, session_id: str) -> SessionContext:
+    """打开已有会话目录并返回上下文。"""
+
+    session_dir = Path(workspace) / ".cowcode" / "sessions" / session_id
+    if not session_dir.is_dir():
+        raise FileNotFoundError(str(session_dir))
+    spill_dir = session_dir / "tool-results"
+    return SessionContext(
+        session_id=session_id,
+        session_dir=str(session_dir),
+        spill_dir=str(spill_dir),
+    )
 
 
 class ContentReplacementState:

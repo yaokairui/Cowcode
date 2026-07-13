@@ -75,12 +75,19 @@ def fixed_modules() -> list[Module]:
     ]
 
 
-def optional_modules(custom_prompt: str = "") -> list[Module]:
+def optional_modules(
+    custom_prompt: str = "",
+    instructions: str = "",
+    memory: str = "",
+) -> list[Module]:
     """返回三个可选槽；空内容由装配器跳过。"""
+    custom_parts = [
+        part.strip() for part in (custom_prompt, instructions) if part.strip()
+    ]
     return [
-        Module("custom_instructions", 80, custom_prompt),
+        Module("custom_instructions", 80, "\n\n".join(custom_parts)),
         Module("active_skills", 90, ""),
-        Module("long_term_memory", 100, ""),
+        Module("long_term_memory", 100, memory),
     ]
 
 
@@ -92,9 +99,15 @@ def assemble_system(modules: list[Module]) -> str:
     )
 
 
-def build_system_prompt(custom_prompt: str = "") -> str:
+def build_system_prompt(
+    custom_prompt: str = "",
+    instructions: str = "",
+    memory: str = "",
+) -> str:
     """构造跨轮稳定的完整系统提示。"""
-    return assemble_system(fixed_modules() + optional_modules(custom_prompt))
+    return assemble_system(
+        fixed_modules() + optional_modules(custom_prompt, instructions, memory)
+    )
 
 
 SYSTEM_PROMPT = build_system_prompt()
@@ -127,9 +140,13 @@ def plan_reminder(full: bool) -> str:
 
 def render_banner(version: str, cwd: str) -> str:
     """渲染 TUI 启动横幅。"""
-    return f"{CAT_BANNER}\nCowcode v{version}\ncwd: {cwd}\nReady."
+    return f"{CAT_BANNER}\nCowcode v{version}\ncwd: {cwd}\nReady. 输入 /help 查看可用命令。"
 
 
-def get_system_prompt(custom_prompt: str = "") -> str:
+def get_system_prompt(
+    custom_prompt: str = "",
+    instructions: str = "",
+    memory: str = "",
+) -> str:
     """兼容旧调用方，返回模块化稳定系统提示。"""
-    return build_system_prompt(custom_prompt)
+    return build_system_prompt(custom_prompt, instructions, memory)

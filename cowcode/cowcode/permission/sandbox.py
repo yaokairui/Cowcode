@@ -42,4 +42,6 @@ def sandbox_ok(root: str, path: str) -> bool:
     except (OSError, ValueError, RuntimeError):
         return False
     resolved_clean = resolved.rstrip(os.sep)
-    return resolved_clean == root_resolved or resolved_clean.startswith(root_resolved + os.sep)
+    return resolved_clean == root_resolved or resolved_clean.startswith(
+        root_resolved + os.sep
+    )

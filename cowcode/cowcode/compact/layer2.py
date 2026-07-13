@@ -51,7 +51,9 @@ def pick_recent_tail(msgs: list[Message]) -> list[Message]:
     return list(msgs[start_idx:])
 
 
-def _join_after_summary(summary_and_recovery: Message, recent: list[Message]) -> list[Message]:
+def _join_after_summary(
+    summary_and_recovery: Message, recent: list[Message]
+) -> list[Message]:
     if not recent:
         return [summary_and_recovery]
     recent = list(recent)
@@ -60,7 +62,9 @@ def _join_after_summary(summary_and_recovery: Message, recent: list[Message]) ->
     if recent and recent[0].role == "user":
         return [
             summary_and_recovery,
-            Message(role="assistant", content="（已加载上下文摘要与恢复信息。请继续。）"),
+            Message(
+                role="assistant", content="（已加载上下文摘要与恢复信息。请继续。）"
+            ),
             *recent,
         ]
     return [summary_and_recovery, *recent]
@@ -95,7 +99,9 @@ async def summarize_once(in_: "ManageInput", msgs: list[Message]) -> str:
     return extract_summary("".join(text))
 
 
-async def ptl_retry(in_: "ManageInput", msgs: list[Message], first_err: Exception) -> str:
+async def ptl_retry(
+    in_: "ManageInput", msgs: list[Message], first_err: Exception
+) -> str:
     """摘要请求自身过长时，逐步丢弃旧消息组后重试。"""
 
     groups = group_by_user_turn(msgs)

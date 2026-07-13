@@ -5,7 +5,9 @@ import re
 # 启发式、非完备防御。以下模式不可被任何配置、规则或模式放开（含 bypassPermissions）。
 _BLACKLIST: list[re.Pattern] = [
     # rm -rf 根/家目录及变体
-    re.compile(r"\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+([\"']?\s*(/|~|\$HOME|/\*)\s*[\"']?)"),
+    re.compile(
+        r"\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+([\"']?\s*(/|~|\$HOME|/\*)\s*[\"']?)"
+    ),
     # 写块设备（含 dd 重写设备头）
     re.compile(r"\bdd\b.*\bof=\s*/dev/(sd|hd|nvme|xvd|vd|disk|loop|mapper)"),
     # fork bomb

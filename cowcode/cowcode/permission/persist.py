@@ -24,7 +24,9 @@ def persist_local_allow(engine: Engine, call: Any) -> None:
     try:
         settings = load_settings(local_path)
     except SettingsError:
-        settings = __import__("cowcode.permission.settings", fromlist=["Settings"]).Settings()
+        settings = __import__(
+            "cowcode.permission.settings", fromlist=["Settings"]
+        ).Settings()
 
     # 去重追加
     if rule_str not in settings.permissions.allow:

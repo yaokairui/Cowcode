@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -17,27 +19,66 @@ from textual.widgets import Footer, OptionList, RichLog, Static, TextArea
 from textual.widgets._option_list import Option
 
 from cowcode import __version__
-from cowcode.agent import Agent, ApprovalRequest, AskUserEvent, CompactEvent, CompactPhase, Phase
-from cowcode.config import Config, ConfigError, ProviderConfig, effective_context_window, load_configs
+from cowcode.agent import (
+    Agent,
+    ApprovalRequest,
+    AskUserEvent,
+    CompactEvent,
+    CompactPhase,
+    Phase,
+)
+from cowcode.command import Kind, Registry as CommandRegistry, parse, register_builtins
+from cowcode.completion import CompletionMenu
+from cowcode.config import (
+    Config,
+    ConfigError,
+    ProviderConfig,
+    effective_context_window,
+    load_configs,
+)
 from cowcode.environment import gather_environment
 from cowcode import mcp as mcp_client
 from cowcode.permission import Engine, Mode, Outcome, new_engine
-from cowcode.prompt import EXECUTE_DIRECTIVE, build_system_prompt
+from cowcode.prompt import build_system_prompt
 from cowcode.provider import Provider, create_provider
 from cowcode.runtime import SessionRuntime
-from cowcode.session import Session
+from cowcode.session import (
+    Session,
+    SessionInfo,
+    Writer,
+    clean_expired,
+    last_message_ts,
+    list_sessions,
+    load_session,
+)
+from cowcode.instructions import Loader as InstructionsLoader
+from cowcode.memory import Manager as MemoryManager
 from cowcode.tool import Registry, new_default_registry, truncate_text
 from cowcode.compact import (
     AutoCompactTrackingState,
     ContentReplacementState,
     RecoveryState,
     new_session_context,
+    open_session_context,
 )
+from cowcode.compact.const import AUTO_SAFETY_MARGIN, SUMMARY_RESERVE
+from cowcode.compact.token import estimate_tokens
 
 __all__ = ["CowcodeApp", "main"]
 
 _CONTEXT_COLLAPSED_H = 4
 _CONTEXT_EXPANDED_H = 12
+
+
+@dataclass
+class ResumeState:
+    """会话恢复列表状态。"""
+
+    items: list[SessionInfo]
+    filtered: list[SessionInfo]
+    query: str = ""
+    selected: int = 0
+
 
 CAT_BANNER = r"""
    ____                              _
@@ -65,12 +106,41 @@ def format_compact_notice(event: CompactEvent) -> str:
     """统一格式化压缩状态提示。"""
 
     if event.phase == CompactPhase.BEFORE_AUTO:
-        return "正在压缩上下文..."
+        return "⟳ Compacting conversation..."
     if event.phase == CompactPhase.BEFORE_EMERGENCY:
-        return "上下文撞墙，自动压缩中..."
+        return "⟳ Context limit hit, compacting conversation..."
     if event.err is not None:
-        return f"压缩失败：{event.err}"
-    return f"已压缩，token 从 {event.before} 降至 {event.after}"
+        return f"✗ Compact failed: {event.err}"
+    arrow = "↓" if event.after <= event.before else "↑"
+    note = "" if event.after <= event.before else "（压缩摘要与恢复段比原文更长）"
+    return f"◉ Compacted: {event.before} → {event.after} estimated tokens {arrow}{note}"
+
+
+def _format_relative_time(value: datetime) -> str:
+    seconds = max(0, int((datetime.now() - value).total_seconds()))
+    if seconds < 60:
+        return "just now"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} min ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} hours ago"
+    days = hours // 24
+    return f"{days} days ago"
+
+
+def _format_size(size: int) -> str:
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f}MB"
+    if size >= 1024:
+        return f"{size / 1024:.1f}KB"
+    return f"{size}B"
+
+
+def _format_session_item(info: SessionInfo) -> str:
+    model = info.model or "unknown-model"
+    return f"{info.title} · {_format_relative_time(info.modified_at)} · {model} · {_format_size(info.size)}"
 
 
 class ToolDisplay:
@@ -280,6 +350,24 @@ class CowcodeApp(App[Any]):
         max-height: 8;
     }
 
+    # slash command completion menu
+    #completion {
+        height: auto;
+        max-height: 10;
+        padding: 0 1;
+        color: $text;
+        background: $boost;
+    }
+
+    # slash command completion menu
+    #completion {
+        height: auto;
+        max-height: 10;
+        padding: 0 1;
+        color: $text;
+        background: $boost;
+    }
+
     #status-bar {
         height: 1;
         padding: 0 1;
@@ -298,6 +386,11 @@ class CowcodeApp(App[Any]):
         mcp_server_count: int = 0,
         mcp_tool_count: int = 0,
         runtime: SessionRuntime | None = None,
+        writer: Writer | None = None,
+        memory_manager: MemoryManager | None = None,
+        instruction_text: str = "",
+        memory_text: str = "",
+        sessions_dir: str = "",
     ) -> None:
         super().__init__()
         self._providers = providers
@@ -315,6 +408,13 @@ class CowcodeApp(App[Any]):
             auto_tracking=AutoCompactTrackingState(),
             session=new_session_context(str(Path.cwd())),
         )
+        self._writer = writer
+        self._memory_manager = memory_manager
+        if self._memory_manager is not None:
+            self._memory_manager.set_on_updated(self._on_memory_updated)
+        self._instruction_text = instruction_text
+        self._memory_text = memory_text
+        self._sessions_dir = sessions_dir or str(Path.cwd() / ".cowcode" / "sessions")
         self._session: Session | None = None
         self._full_response = ""
         self._timer_handle: Timer | None = None
@@ -326,6 +426,12 @@ class CowcodeApp(App[Any]):
         self._status_bar: Static
         self._context_header: ContextHeader
         self._streaming_response: Static
+        self._resume_state: ResumeState | None = None
+        self._cmd_registry = CommandRegistry()
+        register_builtins(self._cmd_registry)
+        self._completion = CompletionMenu()
+        self._completion_view: Static
+        self._pending_println: list[tuple[str, str]] = []
 
         # 权限模式与待批准状态
         self._mode: Mode = engine.start_mode if engine else Mode.DEFAULT
@@ -353,6 +459,7 @@ class CowcodeApp(App[Any]):
             show_line_numbers=False,
             soft_wrap=True,
         )
+        yield Static("", id="completion")
         yield Static("", id="status-bar")
         yield Footer()
 
@@ -360,6 +467,7 @@ class CowcodeApp(App[Any]):
         self._conversation = self.query_one("#conversation", RichLog)
         self._input = self.query_one("#input-box", MessageInput)
         self._timer_label = self.query_one("#timer", Static)
+        self._completion_view = self.query_one("#completion", Static)
         self._status_bar = self.query_one("#status-bar", Static)
         self._context_header = self.query_one(ContextHeader)
         self._streaming_response = self.query_one("#streaming-response", Static)
@@ -384,12 +492,52 @@ class CowcodeApp(App[Any]):
                 callback=self._on_provider_selected,
             )
 
+    def on_key(self, event) -> None:
+        """Resume 模式与 slash 补全模式下截获导航按键。"""
+
+        state = self._resume_state
+        if (
+            state is None
+            and self._completion.active
+            and self._handle_completion_key(event)
+        ):
+            return
+        if state is None:
+            return
+        key = getattr(event, "key", "")
+        char = getattr(event, "character", None)
+        handled = True
+        if key == "up":
+            if state.filtered:
+                state.selected = max(0, state.selected - 1)
+        elif key == "down":
+            if state.filtered:
+                state.selected = min(len(state.filtered) - 1, state.selected + 1)
+        elif key == "backspace":
+            state.query = state.query[:-1]
+            self._filter_resume_items()
+        elif key == "escape":
+            self._exit_resume_mode()
+        elif isinstance(char, str) and char and char.isprintable():
+            state.query += char
+            self._filter_resume_items()
+        else:
+            handled = False
+        if handled:
+            self._input.clear()
+            if self._resume_state is not None:
+                self._render_resume_list()
+            self._sync_completion_from_input()
+            event.stop()
+
     def action_toggle_context(self) -> None:
         self._context_header.toggle_context()
 
     def action_cancel_or_quit(self) -> None:
         """Esc/Ctrl+C：流式态/待批准态取消本轮；空闲态退出。"""
-        if self._is_streaming and self._turn_cancel is not None:
+        if self._resume_state is not None:
+            self._exit_resume_mode()
+        elif self._is_streaming and self._turn_cancel is not None:
             self._turn_cancel.set()
         elif self._pending_approval is not None:
             # 待批准态取消：兜底送 DENY_ONCE 解阻塞
@@ -401,7 +549,11 @@ class CowcodeApp(App[Any]):
 
     def action_cycle_mode(self) -> None:
         """Shift+Tab：循环切换权限模式（仅空闲态生效）。"""
-        if self._is_streaming or self._pending_approval is not None:
+        if (
+            self._is_streaming
+            or self._pending_approval is not None
+            or self._resume_state is not None
+        ):
             return
         from cowcode.permission import next_mode
 
@@ -423,8 +575,15 @@ class CowcodeApp(App[Any]):
 
     def _select_provider(self, provider_config: ProviderConfig) -> None:
         self._selected_provider = provider_config
-        self._session = Session()
+        if self._writer is not None:
+            self._writer.bind_model(provider_config.model)
+        self._session = Session(
+            on_append=self._writer.on_append if self._writer is not None else None,
+            on_replace=self._writer.on_replace if self._writer is not None else None,
+        )
         self._provider = create_provider(provider_config)
+        if self._memory_manager is not None:
+            self._memory_manager.set_provider(self._provider, provider_config.model)
         self._runtime.context_window = effective_context_window(provider_config)
         self._agent = None
         self._mode = self._engine.start_mode if self._engine else Mode.DEFAULT
@@ -436,6 +595,14 @@ class CowcodeApp(App[Any]):
             return
         self._select_provider(self._providers[int(provider_index)])
 
+    def _on_memory_updated(
+        self, memory_text: str, changed_files: list[str] | None = None
+    ) -> None:
+        self._memory_text = memory_text
+        self._agent = None
+        if changed_files:
+            self._print_notice("已更新记忆：" + ", ".join(changed_files))
+
     def _ensure_agent(self) -> Agent | None:
         if self._provider is None:
             return None
@@ -446,10 +613,15 @@ class CowcodeApp(App[Any]):
             self._agent = Agent(
                 self._provider,
                 self._tool_registry,
-                system_prompt=build_system_prompt(self._config.system_prompt),
+                system_prompt=build_system_prompt(
+                    self._config.system_prompt,
+                    self._instruction_text,
+                    self._memory_text,
+                ),
                 environment=environment,
                 engine=self._engine,
                 runtime=self._runtime,
+                memory_manager=self._memory_manager,
             )
         return self._agent
 
@@ -525,6 +697,44 @@ class CowcodeApp(App[Any]):
         self._conversation.write("")
         self._conversation.write(Text(text, style="dim italic"))
 
+    def _render_completion(self) -> None:
+        if hasattr(self, "_completion_view"):
+            self._completion_view.update(
+                self._completion.render(self.size.width)
+                if self._completion.active
+                else ""
+            )
+
+    def _sync_completion_from_input(self) -> None:
+        if not hasattr(self, "_input"):
+            return
+        self._completion.update(self._input.text, self._cmd_registry)
+        self._render_completion()
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if getattr(event.text_area, "id", "") == "input-box":
+            self._sync_completion_from_input()
+
+    def _handle_completion_key(self, event) -> bool:
+        key = getattr(event, "key", "")
+        if key == "up":
+            self._completion.move_up()
+        elif key == "down":
+            self._completion.move_down()
+        elif key == "escape":
+            self._completion.hide()
+        elif key in {"enter", "tab"}:
+            selected = self._completion.selected()
+            self._completion.hide()
+            if selected is not None:
+                self._input.text = f"/{selected.name}"
+                self.run_worker(self._handle_send(), exclusive=True)
+        else:
+            return False
+        self._render_completion()
+        event.stop()
+        return True
+
     def _set_streaming_response(self, text: str) -> None:
         if text:
             self._streaming_response.update(Text(f"Cowcode:\n{text}", style="yellow"))
@@ -542,39 +752,296 @@ class CowcodeApp(App[Any]):
             Text("  -> " + summary.replace("\n", "\n     "), style=style)
         )
 
-    async def _handle_command(self, command: str) -> None:
-        """处理内置斜杠命令，不写入对话历史。"""
+    def println(self, msg: str) -> None:
+        self._pending_println.append(("notice", msg))
 
+    def error(self, msg: str) -> None:
+        self._pending_println.append(("error", msg))
+
+    def mode(self) -> Mode:
+        return self._mode
+
+    def set_mode(self, mode: Mode) -> None:
+        self._mode = mode
+        self._update_status_bar()
+
+    def inject_and_send(self, display_label: str, preset_prompt: str) -> None:
+        if self._session is None:
+            self.error("Not connected to a provider.")
+            return
+        self._session.append("user", preset_prompt)
+        self._print_notice(f"已注入 {display_label}。")
+        self._start_agent_run(self._mode)
+
+    def usage_in(self) -> int:
+        return self._usage_in
+
+    def usage_out(self) -> int:
+        return self._usage_out
+
+    def model_name(self) -> str:
+        return (
+            self._selected_provider.model if self._selected_provider is not None else ""
+        )
+
+    def cwd(self) -> str:
+        return str(Path.cwd())
+
+    def tool_count(self) -> int:
+        return self._tool_registry.count()
+
+    def memory_files(self) -> list[str]:
+        if self._memory_manager is None:
+            return []
+        project, user = self._memory_manager.list_files()
+        return project + user
+
+    def session_path(self) -> str:
+        return str(self._writer.path) if self._writer is not None else ""
+
+    def session_id(self) -> str:
+        return self._runtime.session.session_id if self._runtime is not None else ""
+
+    def idle(self) -> bool:
+        return (
+            not self._is_streaming
+            and self._pending_approval is None
+            and self._resume_state is None
+        )
+
+    def quit(self) -> None:
+        if self._turn_cancel is not None:
+            self._turn_cancel.set()
+        self.exit()
+
+    def force_compact(self) -> None:
+        self.run_worker(self._handle_compact_command(), exclusive=True)
+
+    def open_resume_menu(self) -> None:
+        sessions = list_sessions(self._sessions_dir)
+        if not sessions:
+            self._print_notice("没有可恢复的会话。")
+            return
+        self._enter_resume_mode(sessions)
+
+    def clear_and_new_session(self) -> None:
+        try:
+            new_context = new_session_context(str(Path.cwd()))
+            new_writer = Writer(new_context.session_dir)
+            if self._selected_provider is not None:
+                new_writer.bind_model(self._selected_provider.model)
+        except Exception as exc:
+            self.error(str(exc))
+            return
+        old_writer = self._writer
+        self._writer = new_writer
+        self._session = Session(
+            on_append=new_writer.on_append, on_replace=new_writer.on_replace
+        )
+        self._runtime.reset_for_new_session(new_context)
+        self._agent = None
+        self._iter = 0
+        self._usage_in = 0
+        self._usage_out = 0
+        if old_writer is not None:
+            old_writer.close()
+        self._conversation.clear()
+        self._context_header.clear_context()
+        self._set_streaming_response("")
+        self._update_status_bar()
+
+    async def dispatch_slash(self, text: str) -> bool:
+        """本地分发 slash 命令。"""
+
+        name, is_slash = parse(text)
+        if not is_slash:
+            return False
+        self._pending_println.clear()
+        cmd = self._cmd_registry.lookup(name)
+        if cmd is None:
+            self.println("未知命令：输入 /help 查看可用命令")
+        elif cmd.kind in {Kind.UI, Kind.PROMPT} and not self.idle():
+            self.error("请等待当前任务完成")
+        else:
+            try:
+                await cmd.handler(self)
+            except Exception as exc:
+                self.error(str(exc))
+        for kind, msg in self._pending_println:
+            if kind == "error":
+                self._print_error(msg)
+            else:
+                self._print_notice(msg)
+        self._pending_println.clear()
         self._input.clear()
-        if command == "/exit":
-            self.exit()
-            return
-        if command == "/mode":
-            from cowcode.permission import next_mode
+        self._completion.hide()
+        self._render_completion()
+        return True
 
-            self._mode = next_mode(self._mode)
-            self._print_notice("已切换权限模式。")
-            self._update_status_bar()
+    async def _handle_resume_command(self) -> None:
+        if self._is_streaming:
+            self._print_notice("请等待当前任务完成。")
             return
-        if command == "/plan":
-            self._mode = Mode.PLAN
-            self._print_notice("已进入计划模式（只读工具），产出计划后请用 /do 批准执行。")
-            self._update_status_bar()
+        sessions = list_sessions(self._sessions_dir)
+        if not sessions:
+            self._print_notice("没有可恢复的会话。")
             return
-        if command == "/do":
-            if self._session is None:
-                self._print_error("Not connected to a provider.")
-                return
-            self._mode = Mode.DEFAULT
-            self._session.append("user", EXECUTE_DIRECTIVE)
-            self._print_notice("已切回正常模式，开始按计划执行。")
-            self._update_status_bar()
-            self._start_agent_run(self._mode)
+        self._enter_resume_mode(sessions)
+
+    def _enter_resume_mode(self, sessions: list[SessionInfo]) -> None:
+        self._resume_state = ResumeState(items=sessions, filtered=list(sessions))
+        self._input.clear()
+        self._set_streaming_response("")
+        self._input.placeholder = (
+            "Search sessions... (↑/↓ select, Enter resume, Esc cancel)"
+        )
+        self._render_resume_list()
+        self._input.focus()
+
+    def _exit_resume_mode(self) -> None:
+        self._resume_state = None
+        self._input.clear()
+        self._input.placeholder = (
+            "Type your message... (Enter to send, Alt+Enter for newline)"
+        )
+        self._set_streaming_response("")
+        self._print_notice("已取消恢复会话。")
+        self._input.focus()
+
+    def _filter_resume_items(self) -> None:
+        state = self._resume_state
+        if state is None:
             return
-        if command == "/compact":
-            await self._handle_compact_command()
+        query = state.query.strip().lower()
+        if not query:
+            state.filtered = list(state.items)
+        else:
+            state.filtered = [
+                item
+                for item in state.items
+                if query in item.title.lower()
+                or query in item.model.lower()
+                or query in item.id.lower()
+            ]
+        if not state.filtered:
+            state.selected = 0
+        else:
+            state.selected = min(state.selected, len(state.filtered) - 1)
+
+    def _render_resume_list(self) -> None:
+        state = self._resume_state
+        if state is None:
             return
-        self._print_notice("未知命令: " + command + "，可用命令: /exit /mode /plan /do /compact")
+        lines = [
+            "Resume sessions",
+            f"Search: {state.query or '(empty)'}  ·  ↑/↓ select  Enter resume  Esc cancel",
+        ]
+        if not state.filtered:
+            lines.append("No matching sessions.")
+        else:
+            for index, info in enumerate(state.filtered[:20]):
+                marker = "▶ " if index == state.selected else "  "
+                lines.append(marker + _format_session_item(info))
+            if len(state.filtered) > 20:
+                lines.append(f"... {len(state.filtered) - 20} more")
+        self._set_streaming_response("\n".join(lines))
+
+    async def _resume_selected_session(self) -> None:
+        state = self._resume_state
+        if state is None or not state.filtered:
+            return
+        info = state.filtered[state.selected]
+        await self._do_resume_session(info)
+
+    async def _do_resume_session(self, info: SessionInfo) -> None:
+        try:
+            msgs = load_session(info.dir)
+            new_writer = Writer.open_existing(info.dir)
+            if self._selected_provider is not None:
+                new_writer.bind_model(self._selected_provider.model)
+            new_session = Session.from_messages(
+                msgs,
+                on_append=new_writer.on_append,
+                on_replace=new_writer.on_replace,
+            )
+            try:
+                new_context = open_session_context(str(Path.cwd()), info.id)
+            except Exception:
+                new_writer.close()
+                raise
+        except Exception as exc:
+            self._print_error(f"恢复会话失败: {exc}")
+            return
+
+        old_writer = self._writer
+        self._writer = new_writer
+        self._session = new_session
+        self._runtime.session = new_context
+        self._runtime.usage_anchor = 0
+        self._runtime.anchor_msg_len = 0
+        self._agent = None
+        if old_writer is not None:
+            old_writer.close()
+
+        self._resume_state = None
+        self._input.clear()
+        self._input.placeholder = (
+            "Type your message... (Enter to send, Alt+Enter for newline)"
+        )
+        self._set_streaming_response("")
+        self._print_notice(f"已恢复会话 {info.id}，共 {len(msgs)} 条消息")
+        self._append_resume_gap_notice_if_needed(info)
+        await self._compact_restored_session_if_needed()
+        self._input.focus()
+
+    async def _compact_restored_session_if_needed(self) -> None:
+        if self._session is None or self._provider is None:
+            return
+        estimated = estimate_tokens(0, self._session.get_history(), 0)
+        threshold = self._runtime.context_window - SUMMARY_RESERVE - AUTO_SAFETY_MARGIN
+        if estimated < threshold:
+            return
+        agent = self._ensure_agent()
+        if agent is None:
+            return
+        self._agent = agent
+        defs = (
+            self._tool_registry.read_only_definitions()
+            if self._mode == Mode.PLAN
+            else self._tool_registry.definitions()
+        )
+        self._print_notice(
+            format_compact_notice(CompactEvent(CompactPhase.BEFORE_AUTO))
+        )
+        try:
+            before, after = await agent.run_force_compact(self._session, defs)
+        except Exception as exc:
+            self._print_notice(
+                format_compact_notice(CompactEvent(CompactPhase.AFTER_AUTO, err=exc))
+            )
+            return
+        self._print_notice(
+            format_compact_notice(
+                CompactEvent(CompactPhase.AFTER_AUTO, before=before, after=after)
+            )
+        )
+
+    def _append_resume_gap_notice_if_needed(self, info: SessionInfo) -> None:
+        if self._session is None:
+            return
+        ts = last_message_ts(info.dir)
+        if ts is None:
+            return
+        elapsed = int(time.time()) - ts
+        if elapsed <= 6 * 60 * 60:
+            return
+        hours = max(1, elapsed // 3600)
+        reminder = (
+            f"[系统提示] 本会话已暂停约 {hours} 小时。"
+            "部分上下文可能已过时，如需最新信息请重新读取相关文件。"
+        )
+        self._session.append("user", reminder)
+        self._print_notice(reminder)
 
     async def _handle_compact_command(self) -> None:
         if self._session is None or self._provider is None:
@@ -589,16 +1056,25 @@ class CowcodeApp(App[Any]):
             if self._mode == Mode.PLAN
             else self._tool_registry.definitions()
         )
+        self._print_notice(
+            format_compact_notice(CompactEvent(CompactPhase.BEFORE_AUTO))
+        )
+        self._timer_label.update("⟳ Compacting conversation...")
+        self.refresh(layout=True)
         try:
             before, after = await agent.run_force_compact(self._session, defs)
         except Exception as exc:
-            self._print_notice(format_compact_notice(CompactEvent(CompactPhase.AFTER_AUTO, err=exc)))
+            self._print_notice(
+                format_compact_notice(CompactEvent(CompactPhase.AFTER_AUTO, err=exc))
+            )
+            self._timer_label.update("Compact failed")
             return
         self._print_notice(
             format_compact_notice(
                 CompactEvent(CompactPhase.AFTER_AUTO, before=before, after=after)
             )
         )
+        self._timer_label.update("Compact done")
 
     async def _handle_send(self) -> None:
         """提交当前输入，并消费 Agent 事件流。"""
@@ -606,6 +1082,9 @@ class CowcodeApp(App[Any]):
             return
 
         user_text = self._input.text.strip()
+        if self._resume_state is not None:
+            await self._resume_selected_session()
+            return
         if not user_text:
             return
 
@@ -624,12 +1103,11 @@ class CowcodeApp(App[Any]):
             self._start_agent_run(self._ask_user_mode)
             return
 
-        if user_text.lower() in {"quit", "exit", "/exit"}:
+        if user_text.lower() in {"quit", "exit"}:
             self.exit()
             return
 
-        if user_text.startswith("/"):
-            await self._handle_command(user_text)
+        if await self.dispatch_slash(user_text):
             return
 
         if self._session is None or self._provider is None:
@@ -686,6 +1164,8 @@ class CowcodeApp(App[Any]):
         if self._session is None or self._provider is None:
             self._print_error("Not connected to a provider.")
             return
+        if self._resume_state is not None:
+            return
 
         self._full_response = ""
         self._set_streaming_response("")
@@ -698,6 +1178,7 @@ class CowcodeApp(App[Any]):
         if agent is None:
             self._print_error("Not connected to a provider.")
             return
+        self._agent = agent
         self.run_worker(self._consume_agent_events(agent, mode), exclusive=True)
 
     async def _consume_agent_events(self, agent: Agent, mode: Mode) -> None:
@@ -821,6 +1302,20 @@ async def _amain() -> int:
     import sys
 
     root = str(Path.cwd().resolve())
+    instruction_text = InstructionsLoader(root).load()
+    mem_mgr = MemoryManager(
+        project_dir=str(Path(root) / ".cowcode" / "memory"),
+        user_dir=str(Path.home() / ".cowcode" / "memory"),
+        provider=None,
+        model="",
+    )
+    memory_text = mem_mgr.load_index()
+    session_context = new_session_context(root)
+    writer = Writer(session_context.session_dir)
+    sessions_dir = str(Path(root) / ".cowcode" / "sessions")
+    asyncio.create_task(
+        asyncio.to_thread(clean_expired, sessions_dir, timedelta(days=30))
+    )
     engine, err = new_engine(root)
     if err is not None:
         print("权限引擎降级:", err, file=sys.stderr)
@@ -840,10 +1335,16 @@ async def _amain() -> int:
                 replacement=ContentReplacementState(),
                 recovery=RecoveryState(),
                 auto_tracking=AutoCompactTrackingState(),
-                session=new_session_context(root),
+                session=session_context,
             ),
+            writer=writer,
+            memory_manager=mem_mgr,
+            instruction_text=instruction_text,
+            memory_text=memory_text,
+            sessions_dir=sessions_dir,
         ).run_async()
     finally:
+        writer.close()
         await manager.close()
     return 0
 

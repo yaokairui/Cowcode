@@ -253,5 +253,8 @@ def _check_glob_imports() -> None:
 
 
 # Re-export from submodules
-from cowcode.permission.engine import check as check, mode_fallback as mode_fallback, new_engine as new_engine, start_mode as start_mode  # noqa: E402
+from cowcode.permission.engine import check as check  # noqa: E402
+from cowcode.permission.engine import mode_fallback as mode_fallback  # noqa: E402
+from cowcode.permission.engine import new_engine as new_engine  # noqa: E402
+from cowcode.permission.engine import start_mode as start_mode  # noqa: E402
 from cowcode.permission.persist import persist_local_allow as persist_local_allow  # noqa: E402

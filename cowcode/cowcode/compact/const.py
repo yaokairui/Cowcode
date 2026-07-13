@@ -1,9 +1,9 @@
 """上下文管理硬编码常量。"""
 
 # 单条工具结果落盘阈值，单位 UTF-8 字节。
-SINGLE_RESULT_LIMIT = 50000
+SINGLE_RESULT_LIMIT = 5000
 # 单条 tool 消息内工具结果聚合阈值，单位 UTF-8 字节。
-MESSAGE_AGGREGATE_LIMIT = 200000
+MESSAGE_AGGREGATE_LIMIT = 5000
 # 摘要模型输出预留 token。
 SUMMARY_RESERVE = 20000
 # 自动压缩的估算安全余量。

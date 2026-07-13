@@ -33,7 +33,9 @@ def render_tools_block(defs: list[ToolDefinition]) -> str:
         return "(无)\n"
     lines: list[str] = []
     for tool in defs:
-        schema = json.dumps(tool.input_schema, ensure_ascii=False, separators=(",", ":"))
+        schema = json.dumps(
+            tool.input_schema, ensure_ascii=False, separators=(",", ":")
+        )
         lines.append(f"- {tool.name}: {tool.description}")
         lines.append(f"  schema: {schema}")
     return "\n".join(lines) + "\n"

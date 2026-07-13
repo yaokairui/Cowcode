@@ -78,7 +78,11 @@ async def manage_context(in_: ManageInput) -> ManageOutput:
     if in_.trigger == TriggerKind.MANUAL:
         new_msgs, _before, after = await force_compact(in_)
         _replace(in_.conv, new_msgs)
-        _LOG.info("context compacted trigger=manual before=%s after=%s", in_.estimated_token, after)
+        _LOG.info(
+            "context compacted trigger=manual before=%s after=%s",
+            in_.estimated_token,
+            after,
+        )
         return ManageOutput(in_.estimated_token, after)
 
     if in_.trigger == TriggerKind.EMERGENCY:
@@ -86,14 +90,20 @@ async def manage_context(in_: ManageInput) -> ManageOutput:
         _replace(in_.conv, layer1_out)
         new_msgs, _before, after = await force_compact(in_)
         _replace(in_.conv, new_msgs)
-        _LOG.info("context compacted trigger=emergency before=%s after=%s", in_.estimated_token, after)
+        _LOG.info(
+            "context compacted trigger=emergency before=%s after=%s",
+            in_.estimated_token,
+            after,
+        )
         return ManageOutput(in_.estimated_token, after)
 
     layer1_out = offload_and_snip(_history(in_.conv), in_.replacement, in_.session)
     _replace(in_.conv, layer1_out)
     est = estimate_tokens(in_.usage_anchor, layer1_out, in_.anchor_msg_len)
     if in_.context_window <= SUMMARY_RESERVE + AUTO_SAFETY_MARGIN:
-        _LOG.warning("context_window too small, skip auto compact: %s", in_.context_window)
+        _LOG.warning(
+            "context_window too small, skip auto compact: %s", in_.context_window
+        )
         return ManageOutput(in_.estimated_token, est)
     threshold = in_.context_window - SUMMARY_RESERVE - AUTO_SAFETY_MARGIN
     if est < threshold or in_.auto_tracking.tripped():
@@ -101,5 +111,7 @@ async def manage_context(in_: ManageInput) -> ManageOutput:
 
     new_msgs, _before, after = await auto_compact(in_)
     _replace(in_.conv, new_msgs)
-    _LOG.info("context compacted trigger=auto before=%s after=%s", in_.estimated_token, after)
+    _LOG.info(
+        "context compacted trigger=auto before=%s after=%s", in_.estimated_token, after
+    )
     return ManageOutput(in_.estimated_token, after)

@@ -17,7 +17,12 @@ from cowcode.permission import (
 )
 from cowcode.permission.blacklist import hits_blacklist
 from cowcode.permission.sandbox import resolve_root, sandbox_ok
-from cowcode.permission.settings import SettingsError, default_rules, load_settings, to_rule_set
+from cowcode.permission.settings import (
+    SettingsError,
+    default_rules,
+    load_settings,
+    to_rule_set,
+)
 
 
 def new_engine(root: str) -> tuple[Engine, Exception | None]:
@@ -50,7 +55,9 @@ def new_engine(root: str) -> tuple[Engine, Exception | None]:
     local_path = os.path.join(resolved, ".cowcode", "settings.local.yaml")
 
     user_settings = _load_or_empty(os.path.join(home, ".cowcode", "settings.yaml"))
-    project_settings = _load_or_empty(os.path.join(resolved, ".cowcode", "settings.yaml"))
+    project_settings = _load_or_empty(
+        os.path.join(resolved, ".cowcode", "settings.yaml")
+    )
     local_settings = _load_or_empty(local_path)
 
     user_rules = to_rule_set(user_settings)
@@ -86,7 +93,9 @@ def _load_or_empty(path: str) -> Any:
         return _default_settings
 
 
-_default_settings = __import__("cowcode.permission.settings", fromlist=["Settings"]).Settings()
+_default_settings = __import__(
+    "cowcode.permission.settings", fromlist=["Settings"]
+).Settings()
 
 
 def mode_fallback(mode: Mode, cat: Category) -> Decision:
@@ -135,7 +144,11 @@ def check(
     ):
         decision, hit = rule_set.match(friendly, target)
         if hit:
-            reason = "" if decision == Decision.ALLOW else f"匹配 deny 规则：{friendly}({target})"
+            reason = (
+                ""
+                if decision == Decision.ALLOW
+                else f"匹配 deny 规则：{friendly}({target})"
+            )
             return decision, reason
 
     # ④ 模式兜底
@@ -150,7 +163,12 @@ Engine.check = lambda self, mode, call, read_only: check(self, mode, call, read_
 
 
 def _cat_label(cat: Category) -> str:
-    return {Category.READ: "只读", Category.WRITE: "文件写", Category.EXEC: "命令执行"}.get(cat, "未知")
+    return {
+        Category.READ: "只读",
+        Category.WRITE: "文件写",
+        Category.EXEC: "命令执行",
+    }.get(cat, "未知")
+
 
 def start_mode(engine: Engine) -> Mode:
     return engine.start_mode

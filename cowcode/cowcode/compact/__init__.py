@@ -1,6 +1,11 @@
 """compact 包公共入口。"""
 
-from cowcode.compact.compact import ManageInput, ManageOutput, TriggerKind, manage_context
+from cowcode.compact.compact import (
+    ManageInput,
+    ManageOutput,
+    TriggerKind,
+    manage_context,
+)
 from cowcode.compact.state import (
     AutoCompactTrackingState,
     ContentReplacementState,
@@ -8,6 +13,8 @@ from cowcode.compact.state import (
     RecoveryState,
     SessionContext,
     new_session_context,
+    open_session_context,
+    parse_session_time,
 )
 
 __all__ = [
@@ -21,4 +28,6 @@ __all__ = [
     "TriggerKind",
     "manage_context",
     "new_session_context",
+    "open_session_context",
+    "parse_session_time",
 ]
