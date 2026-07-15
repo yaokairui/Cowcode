@@ -77,7 +77,8 @@ _OUTCOME_INDEXS[:] = [Outcome.ALLOW_ONCE, Outcome.ALLOW_FOREVER, Outcome.DENY_ON
 @dataclass
 class Rule:
     tool: str  # friendly name
-    pattern: str = ""  # "" means match all calls
+    matcher: Any | None = None  # None means match all calls
+    raw: str = ""
     allow: bool = True
 
 
@@ -89,10 +90,10 @@ class RuleSet:
     def match(self, friendly: str, target: str) -> tuple[Decision, bool]:
         """先 deny 后 allow；命中返回 (Decision, True)。"""
         for rule in self.deny:
-            if rule.tool == friendly and _match_pattern(rule.pattern, target):
+            if rule.tool == friendly and match_rule(rule, target):
                 return Decision.DENY, True
         for rule in self.allow:
-            if rule.tool == friendly and _match_pattern(rule.pattern, target):
+            if rule.tool == friendly and match_rule(rule, target):
                 return Decision.ALLOW, True
         return Decision.ALLOW, False
 
@@ -150,6 +151,14 @@ def _categorize(internal: str, read_only: bool) -> Category:
     return Category.EXEC
 
 
+def match_rule(rule: Rule, target: str) -> bool:
+    """matcher 为空表示该工具全匹配。"""
+
+    if rule.matcher is None:
+        return True
+    return bool(rule.matcher.match(target))
+
+
 def _match_pattern(pattern: str, target: str) -> bool:
     """pattern 为空 → 匹配全部；否则按 glob 语义匹配。"""
     if not pattern:
@@ -196,21 +205,39 @@ def _segment_list_match(pat_parts: list[str], tgt_parts: list[str]) -> bool:
     return pi == len(pat_parts) and ti == len(tgt_parts)
 
 
-def _parse_rule(text: str) -> tuple[Rule, bool]:
-    """解析 "Tool(pattern)" 或 "Tool"。非法返回空 Rule + False。"""
+def parse_rule(text: str) -> tuple[Rule | None, str | None]:
+    """解析权限规则，支持 glob、`=exact`、`~regex`、`!not` 四种语法。"""
+
     text = text.strip()
     if not text:
-        return Rule("", "", False), False
+        return None, "empty rule"
     if "(" not in text:
-        return Rule(tool=text, pattern="", allow=True), True
+        return Rule(tool=text, matcher=None, raw=text, allow=True), None
     open_idx = text.index("(")
     if not text.endswith(")"):
-        return Rule("", "", False), False
+        return None, "missing closing ')'"
     tool = text[:open_idx].strip()
     pattern = text[open_idx + 1 : -1].strip()
     if not tool:
-        return Rule("", "", False), False
-    return Rule(tool=tool, pattern=pattern, allow=True), True
+        return None, "empty tool name"
+    if not pattern:
+        return Rule(tool=tool, matcher=None, raw=text, allow=True), None
+    try:
+        from cowcode.permission.matcher import compile_matcher
+
+        matcher = compile_matcher(pattern, is_command=(tool == "Bash"))
+    except ValueError as exc:
+        return None, str(exc)
+    return Rule(tool=tool, matcher=matcher, raw=text, allow=True), None
+
+
+def _parse_rule(text: str) -> tuple[Rule, bool]:
+    """兼容旧调用：解析失败返回空 Rule + False。"""
+
+    rule, err = parse_rule(text)
+    if err is not None or rule is None:
+        return Rule("", None, text, False), False
+    return rule, True
 
 
 def _extract_target(call: Any) -> tuple[str, bool, bool]:

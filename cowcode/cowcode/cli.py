@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ from cowcode.agent import (
     Phase,
 )
 from cowcode.command import Kind, Registry as CommandRegistry, parse, register_builtins
+from cowcode.command import SkillSummary, register_skills_as_commands, remove_skill_commands
 from cowcode.completion import CompletionMenu
 from cowcode.config import (
     Config,
@@ -35,14 +37,22 @@ from cowcode.config import (
     ProviderConfig,
     effective_context_window,
     load_configs,
+    resolve_config_path,
 )
 from cowcode.environment import gather_environment
-from cowcode import mcp as mcp_client
+from cowcode import hook, mcp as mcp_client
+from cowcode.hook import Event as HookEvent
+from cowcode.hook.rule import Rule as HookRule
 from cowcode.permission import Engine, Mode, Outcome, new_engine
 from cowcode.prompt import build_system_prompt
+from cowcode.prompt import SkillCatalogItem, render_skills_catalog
 from cowcode.provider import Provider, create_provider
 from cowcode.runtime import SessionRuntime
+from cowcode.skills import Catalog, Executor
+from cowcode.tool.install_skill import InstallSkillTool
+from cowcode.tool.load_skill import LoadSkillTool
 from cowcode.session import (
+    Message,
     Session,
     SessionInfo,
     Writer,
@@ -299,7 +309,7 @@ class CowcodeApp(App[Any]):
         Binding("escape", "cancel_or_quit", "Cancel/Quit"),
         Binding("ctrl+c", "cancel_or_quit", "Cancel/Quit"),
         Binding("ctrl+t", "toggle_context", "Context"),
-        Binding("ctrl+g", "cycle_mode", "Mode"),
+        Binding("f2", "cycle_mode", "Mode"),
     ]
 
     CSS = """
@@ -359,15 +369,6 @@ class CowcodeApp(App[Any]):
         background: $boost;
     }
 
-    # slash command completion menu
-    #completion {
-        height: auto;
-        max-height: 10;
-        padding: 0 1;
-        color: $text;
-        background: $boost;
-    }
-
     #status-bar {
         height: 1;
         padding: 0 1;
@@ -391,6 +392,9 @@ class CowcodeApp(App[Any]):
         instruction_text: str = "",
         memory_text: str = "",
         sessions_dir: str = "",
+        catalog: Catalog | None = None,
+        skill_executor: Executor | None = None,
+        hook_engine: object | None = None,
     ) -> None:
         super().__init__()
         self._providers = providers
@@ -415,6 +419,10 @@ class CowcodeApp(App[Any]):
         self._instruction_text = instruction_text
         self._memory_text = memory_text
         self._sessions_dir = sessions_dir or str(Path.cwd() / ".cowcode" / "sessions")
+        self._catalog = catalog or Catalog()
+        self._skill_executor = skill_executor
+        self.hook_engine = hook_engine
+        self._runtime.hook_engine = hook_engine
         self._session: Session | None = None
         self._full_response = ""
         self._timer_handle: Timer | None = None
@@ -429,6 +437,8 @@ class CowcodeApp(App[Any]):
         self._resume_state: ResumeState | None = None
         self._cmd_registry = CommandRegistry()
         register_builtins(self._cmd_registry)
+        if self._skill_executor is not None:
+            self._refresh_skill_commands()
         self._completion = CompletionMenu()
         self._completion_view: Static
         self._pending_println: list[tuple[str, str]] = []
@@ -483,6 +493,7 @@ class CowcodeApp(App[Any]):
             )
         )
         self._conversation.write(Text("Ready. Send a message to begin.", style="green"))
+        self.run_worker(self._dispatch_session_start())
 
         if len(self._providers) == 1:
             self._select_provider(self._providers[0])
@@ -491,6 +502,26 @@ class CowcodeApp(App[Any]):
                 ProviderSelectScreen(self._providers),
                 callback=self._on_provider_selected,
             )
+
+    async def _dispatch_session_start(self) -> None:
+        await self._dispatch_hook(HookEvent.SESSION_START)
+
+    async def _dispatch_session_end(self) -> None:
+        await self._dispatch_hook(HookEvent.SESSION_END)
+
+    async def _dispatch_hook(self, event: HookEvent, **extra: object) -> None:
+        engine = self.hook_engine
+        if engine is None:
+            return
+        payload = {
+            "event": event.value,
+            "session_id": self._runtime.session.session_id,
+            "cwd": str(Path.cwd()),
+            "mode": str(self._mode),
+        }
+        payload.update(extra)
+        result = await engine.dispatch(event, payload)
+        await self._runtime.append_reminders(result.injected_prompts)
 
     def on_key(self, event) -> None:
         """Resume 模式与 slash 补全模式下截获导航按键。"""
@@ -548,12 +579,8 @@ class CowcodeApp(App[Any]):
             self.exit()
 
     def action_cycle_mode(self) -> None:
-        """Shift+Tab：循环切换权限模式（仅空闲态生效）。"""
-        if (
-            self._is_streaming
-            or self._pending_approval is not None
-            or self._resume_state is not None
-        ):
+        """F2：循环切换权限模式。"""
+        if self._resume_state is not None:
             return
         from cowcode.permission import next_mode
 
@@ -582,6 +609,8 @@ class CowcodeApp(App[Any]):
             on_replace=self._writer.on_replace if self._writer is not None else None,
         )
         self._provider = create_provider(provider_config)
+        if self._skill_executor is not None:
+            self._skill_executor.provider_factory = self._create_selected_provider
         if self._memory_manager is not None:
             self._memory_manager.set_provider(self._provider, provider_config.model)
         self._runtime.context_window = effective_context_window(provider_config)
@@ -589,6 +618,14 @@ class CowcodeApp(App[Any]):
         self._mode = self._engine.start_mode if self._engine else Mode.DEFAULT
         self._update_status_bar()
         self._input.focus()
+
+    def _create_selected_provider(self, model: str | None = None) -> Provider | None:
+        if self._selected_provider is None:
+            return None
+        provider_config = self._selected_provider
+        if model:
+            provider_config = replace(provider_config, model=model)
+        return create_provider(provider_config)
 
     def _on_provider_selected(self, provider_index: str | None) -> None:
         if provider_index is None:
@@ -602,6 +639,14 @@ class CowcodeApp(App[Any]):
         self._agent = None
         if changed_files:
             self._print_notice("已更新记忆：" + ", ".join(changed_files))
+
+    def hook_sources(self) -> list[str]:
+        engine = self.hook_engine
+        return [] if engine is None else engine.sources
+
+    def hook_rules(self) -> list[HookRule]:
+        engine = self.hook_engine
+        return [] if engine is None else engine.rules
 
     def _ensure_agent(self) -> Agent | None:
         if self._provider is None:
@@ -617,17 +662,26 @@ class CowcodeApp(App[Any]):
                     self._config.system_prompt,
                     self._instruction_text,
                     self._memory_text,
+                    self._render_skills_catalog_prompt(),
                 ),
                 environment=environment,
                 engine=self._engine,
                 runtime=self._runtime,
                 memory_manager=self._memory_manager,
+                hook_engine=self.hook_engine,
             )
         return self._agent
 
     def _environment_changed(self, environment: str) -> bool:
         agent = self._agent
         return agent is None or getattr(agent, "_environment", "") != environment
+
+    def _render_skills_catalog_prompt(self) -> str:
+        items = [
+            SkillCatalogItem(skill.meta.name, skill.meta.description)
+            for skill in self._catalog.list()
+        ]
+        return render_skills_catalog(items)
 
     def _update_status_bar(self) -> None:
         if self._selected_provider is None:
@@ -697,6 +751,16 @@ class CowcodeApp(App[Any]):
         self._conversation.write("")
         self._conversation.write(Text(text, style="dim italic"))
 
+    def _refresh_skill_commands(self) -> None:
+        if self._skill_executor is None:
+            return
+        remove_skill_commands(self._cmd_registry)
+        register_skills_as_commands(
+            self._cmd_registry,
+            self.list_catalog_skills(),
+            self._skill_executor,
+        )
+
     def _render_completion(self) -> None:
         if hasattr(self, "_completion_view"):
             self._completion_view.update(
@@ -708,6 +772,7 @@ class CowcodeApp(App[Any]):
     def _sync_completion_from_input(self) -> None:
         if not hasattr(self, "_input"):
             return
+        self._refresh_skill_commands()
         self._completion.update(self._input.text, self._cmd_registry)
         self._render_completion()
 
@@ -773,6 +838,42 @@ class CowcodeApp(App[Any]):
         self._print_notice(f"已注入 {display_label}。")
         self._start_agent_run(self._mode)
 
+    def list_catalog_skills(self) -> list[SkillSummary]:
+        return [
+            SkillSummary(
+                name=skill.meta.name,
+                description=skill.meta.description,
+                source=str(skill.source),
+                mode=skill.meta.mode,
+            )
+            for skill in self._catalog.list()
+        ]
+
+    def list_active_skills(self) -> list[str]:
+        return self._runtime.active_skills.names()
+
+    def clear_active_skills(self) -> None:
+        self._runtime.active_skills.clear()
+
+    async def append_assistant_message(self, text: str) -> None:
+        if self._session is None:
+            self.error("Not connected to a provider.")
+            return
+        self._session.append("assistant", text)
+        self._conversation.write("")
+        self._conversation.write(Text("Cowcode:", style="bold yellow"))
+        self._conversation.write(Markdown(text))
+
+    def recent_messages(self, n: int) -> list[Message]:
+        if self._session is None:
+            return []
+        return self._session.get_history()[-n:]
+
+    def all_messages(self) -> list[Message]:
+        if self._session is None:
+            return []
+        return self._session.get_history()
+
     def usage_in(self) -> int:
         return self._usage_in
 
@@ -824,7 +925,7 @@ class CowcodeApp(App[Any]):
             return
         self._enter_resume_mode(sessions)
 
-    def clear_and_new_session(self) -> None:
+    async def clear_and_new_session(self) -> None:
         try:
             new_context = new_session_context(str(Path.cwd()))
             new_writer = Writer(new_context.session_dir)
@@ -833,12 +934,13 @@ class CowcodeApp(App[Any]):
         except Exception as exc:
             self.error(str(exc))
             return
+        await self._dispatch_session_end()
         old_writer = self._writer
         self._writer = new_writer
         self._session = Session(
             on_append=new_writer.on_append, on_replace=new_writer.on_replace
         )
-        self._runtime.reset_for_new_session(new_context)
+        await self._runtime.reset_for_new_session(new_context)
         self._agent = None
         self._iter = 0
         self._usage_in = 0
@@ -849,6 +951,20 @@ class CowcodeApp(App[Any]):
         self._context_header.clear_context()
         self._set_streaming_response("")
         self._update_status_bar()
+        await self._dispatch_session_start()
+
+    def _parse_skill_invocation(self, text: str) -> tuple[str, str] | None:
+        raw = text.strip()
+        if not raw.startswith("/"):
+            return None
+        tail = raw[1:].strip()
+        if not tail or tail.startswith("/"):
+            return None
+        name, _, args = tail.partition(" ")
+        name = name.lower()
+        if self._catalog.get(name) is None:
+            return None
+        return name, args.strip()
 
     async def dispatch_slash(self, text: str) -> bool:
         """本地分发 slash 命令。"""
@@ -856,9 +972,19 @@ class CowcodeApp(App[Any]):
         name, is_slash = parse(text)
         if not is_slash:
             return False
+        self._refresh_skill_commands()
         self._pending_println.clear()
         cmd = self._cmd_registry.lookup(name)
-        if cmd is None:
+        skill_invocation = self._parse_skill_invocation(text)
+        if skill_invocation is not None and (cmd is None or cmd.is_skill):
+            skill_name, skill_args = skill_invocation
+            if not self.idle():
+                self.error("请等待当前任务完成")
+            elif self._skill_executor is not None:
+                await self._skill_executor.execute(self, skill_name, skill_args)
+            else:
+                self.error(f"skill executor not ready: {skill_name}")
+        elif cmd is None:
             self.println("未知命令：输入 /help 查看可用命令")
         elif cmd.kind in {Kind.UI, Kind.PROMPT} and not self.idle():
             self.error("请等待当前任务完成")
@@ -1114,11 +1240,33 @@ class CowcodeApp(App[Any]):
             self._print_error("Not connected to a provider.")
             return
 
+        hook_result = await self._dispatch_user_prompt_submit(user_text)
+        if hook_result is not None and hook_result.blocked:
+            self._print_error(
+                f"[hook {hook_result.blocking_hook_name}] {hook_result.reason}"
+            )
+            return
+
         self._input.clear()
         self._context_header.set_context(user_text)
         self._print_user(user_text)
         self._session.append("user", user_text)
         self._start_agent_run(self._mode)
+
+    async def _dispatch_user_prompt_submit(self, text: str):
+        engine = self.hook_engine
+        if engine is None:
+            return None
+        payload = {
+            "event": HookEvent.USER_PROMPT_SUBMIT.value,
+            "session_id": self._runtime.session.session_id,
+            "cwd": str(Path.cwd()),
+            "mode": str(self._mode),
+            "prompt": text,
+        }
+        result = await engine.dispatch(HookEvent.USER_PROMPT_SUBMIT, payload)
+        await self._runtime.append_reminders(result.injected_prompts)
+        return result
 
     def _on_user_answer(self, answer: str | None) -> None:
         """澄清弹窗回调——收到用户选择或自定义输入。"""
@@ -1184,7 +1332,9 @@ class CowcodeApp(App[Any]):
     async def _consume_agent_events(self, agent: Agent, mode: Mode) -> None:
         """消费 Agent 事件流——由 Textual worker 驱动。"""
         try:
-            async for event in agent.run(self._session, mode, self._turn_cancel):
+            async for event in agent.run(
+                self._session, mode, self._turn_cancel, mode_getter=lambda: self._mode
+            ):
                 if event.err is not None:
                     self._print_error(str(event.err))
                     break
@@ -1301,7 +1451,7 @@ async def _amain() -> int:
 
     import sys
 
-    root = str(Path.cwd().resolve())
+    root = str(resolve_config_path().parent.resolve())
     instruction_text = InstructionsLoader(root).load()
     mem_mgr = MemoryManager(
         project_dir=str(Path(root) / ".cowcode" / "memory"),
@@ -1326,23 +1476,76 @@ async def _amain() -> int:
     try:
         for remote_tool in manager.tools():
             registry.register(remote_tool)
-        await CowcodeApp(
+
+        catalog = Catalog.load(Path(root))
+        hook_engine = hook.load(root)
+        runtime = SessionRuntime(
+            replacement=ContentReplacementState(),
+            recovery=RecoveryState(),
+            auto_tracking=AutoCompactTrackingState(),
+            session=session_context,
+            hook_engine=hook_engine,
+        )
+        active = runtime.active_skills
+        registry.register(LoadSkillTool(catalog, active, registry))
+        registry.register(InstallSkillTool(catalog, Path(root)))
+        for issue in catalog.validate_tools(registry):
+            print(
+                f'skill {issue.skill_name}: allowed_tool "{issue.tool_name}" not registered, skipped',
+                file=sys.stderr,
+            )
+            catalog.remove(issue.skill_name)
+
+        def _provider_factory(model: str | None = None) -> Provider | None:
+            selected = providers[0] if providers else None
+            if selected is None:
+                return None
+            provider_config = selected
+            if model:
+                provider_config = ProviderConfig(
+                    name=selected.name,
+                    protocol=selected.protocol,
+                    base_url=selected.base_url,
+                    api_key=selected.api_key,
+                    model=model,
+                )
+            return create_provider(provider_config)
+
+        skill_executor = Executor(
+            catalog=catalog,
+            active=active,
+            registry=registry,
+            provider_factory=_provider_factory,
+            runtime=runtime,
+            engine=engine,
+            memory_manager=mem_mgr,
+        )
+        app = CowcodeApp(
             providers=providers,
             config=config,
             registry=registry,
             engine=engine,
-            runtime=SessionRuntime(
-                replacement=ContentReplacementState(),
-                recovery=RecoveryState(),
-                auto_tracking=AutoCompactTrackingState(),
-                session=session_context,
-            ),
+            runtime=runtime,
             writer=writer,
             memory_manager=mem_mgr,
             instruction_text=instruction_text,
             memory_text=memory_text,
             sessions_dir=sessions_dir,
-        ).run_async()
+            catalog=catalog,
+            skill_executor=skill_executor,
+            hook_engine=hook_engine,
+        )
+        await app.run_async()
+        if hook_engine is not None:
+            await hook_engine.dispatch(
+                HookEvent.SESSION_END,
+                {
+                    "event": HookEvent.SESSION_END.value,
+                    "session_id": runtime.session.session_id,
+                    "cwd": root,
+                    "mode": str(engine.start_mode),
+                },
+            )
     finally:
         writer.close()
         await manager.close()

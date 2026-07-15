@@ -6,7 +6,7 @@ import asyncio
 import json as _json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 from cowcode.compact import (
     AutoCompactTrackingState,
@@ -23,8 +23,11 @@ from cowcode.compact.const import (
     SUMMARY_RESERVE,
 )
 from cowcode.compact.token import estimate_tokens, usage_anchor
+from cowcode.hook import DispatchResult, Event as HookEvent
+from cowcode.hook.rule import Payload
 from cowcode.permission import Decision, Engine, Mode, Outcome
 from cowcode.prompt import PLAN_REMINDER_INTERVAL, plan_reminder
+from cowcode.prompt import ActiveSkillEntry, render_active_skills_block
 from cowcode.provider import Provider, PromptTooLongError, Request, SystemPrompt
 from cowcode.memory import Manager as MemoryManager
 from cowcode.runtime import SessionRuntime
@@ -154,6 +157,8 @@ class Agent:
         engine: Engine | None = None,
         runtime: SessionRuntime | None = None,
         memory_manager: MemoryManager | None = None,
+        allowed_tools: list[str] | None = None,
+        hook_engine: object | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -169,6 +174,10 @@ class Agent:
             )
         self._runtime = runtime
         self._memory_manager = memory_manager
+        self._hook_engine = hook_engine
+        if hook_engine is not None:
+            self._runtime.hook_engine = hook_engine
+        self._allowed_tools = list(allowed_tools or [])
         self._run_lock = asyncio.Lock()
 
     async def run(
@@ -176,10 +185,13 @@ class Agent:
         session: Session,
         mode: Mode = Mode.DEFAULT,
         cancel: asyncio.Event | None = None,
+        mode_getter: Callable[[], Mode] | None = None,
     ) -> AsyncIterator[Event]:
         """执行 Agent Loop，yield Event 供 TUI 消费。"""
         if cancel is None:
             cancel = asyncio.Event()
+        if mode_getter is None:
+            mode_getter = lambda: mode
 
         async with self._run_lock:
             unknown_run = 0
@@ -191,15 +203,21 @@ class Agent:
                     await self._finish_cancelled(session)
                     return
 
+                current_mode = mode_getter()
                 definitions = (
                     self._registry.read_only_definitions()
-                    if mode == Mode.PLAN
+                    if current_mode == Mode.PLAN
                     else self._registry.definitions()
                 )
+                if self._allowed_tools:
+                    definitions = self._registry.definitions_filtered(
+                        self._allowed_tools
+                    )
                 reminder = ""
-                if mode == Mode.PLAN:
+                if current_mode == Mode.PLAN:
                     full = it == 1 or (it - 1) % PLAN_REMINDER_INTERVAL == 0
                     reminder = plan_reminder(full)
+                reminder = await self._build_reminder(reminder)
 
                 async with self._runtime.lock:
                     anchor = self._runtime.usage_anchor
@@ -336,6 +354,7 @@ class Agent:
                         yield Event(text=final_text)
                     session.append("assistant", final_text)
                     self._maybe_update_memory(session)
+                    await self._dispatch_hook(HookEvent.STOP, {**self._base_payload(HookEvent.STOP), "iter": it})
                     yield Event(done=True)
                     return
 
@@ -344,7 +363,7 @@ class Agent:
 
                 execution_state = _ExecutionState()
                 async for event in self._execute_batched(
-                    calls, mode, cancel, execution_state
+                    calls, mode_getter, cancel, execution_state
                 ):
                     yield event
                 session.add_tool_results(execution_state.results)
@@ -366,6 +385,29 @@ class Agent:
 
     # ---------- 内部 ----------
 
+    async def _build_reminder(self, base: str) -> str:
+        prompts = await self._runtime.take_reminders()
+        if not prompts:
+            return base
+        extra = "\n\n".join(prompts)
+        return f"{base}\n\n{extra}" if base else extra
+
+    async def _dispatch_hook(self, event: HookEvent, payload: Payload) -> DispatchResult:
+        engine = self._hook_engine
+        if engine is None:
+            return DispatchResult()
+        result = await engine.dispatch(event, payload)
+        await self._runtime.append_reminders(result.injected_prompts)
+        return result
+
+    def _base_payload(self, event: HookEvent) -> Payload:
+        return {
+            "event": event.value,
+            "session_id": self._runtime.session.session_id,
+            "cwd": str(Path(self._runtime.session.session_dir).parent.parent.parent),
+            "mode": "",
+        }
+
     async def _stream_once(
         self,
         session: Session,
@@ -375,12 +417,19 @@ class Agent:
         state: _RoundState,
     ) -> AsyncIterator[Event]:
         """单轮流式收集；事件实时转发，最终值写入 state。"""
+        payload = self._base_payload(HookEvent.PRE_USER_MESSAGE)
+        last_user = next(
+            (m.content for m in reversed(session.get_history()) if m.role == "user"), ""
+        )
+        payload["prompt"] = last_user
+        await self._dispatch_hook(HookEvent.PRE_USER_MESSAGE, payload)
+        reminder = await self._build_reminder(reminder)
         request = Request(
             messages=session.get_history(),
             tools=list(definitions),
             system=SystemPrompt(
                 stable=self._system_prompt,
-                environment=self._environment,
+                environment=self._render_environment(),
             ),
             reminder=reminder,
         )
@@ -406,10 +455,52 @@ class Agent:
         if cancel.is_set():
             state.err = asyncio.CancelledError()
 
+    def _render_environment(self) -> str:
+        """每轮请求前拼接动态激活的 Skill SOP。"""
+
+        entries = [
+            ActiveSkillEntry(entry.name, entry.body)
+            for entry in self._runtime.active_skills.snapshot()
+        ]
+        skills_block = render_active_skills_block(entries)
+        if not skills_block:
+            return self._environment
+        if not self._environment.strip():
+            return skills_block
+        return self._environment.rstrip() + "\n\n" + skills_block
+
+    async def _pre_tool_hook_result(self, call: ToolCall) -> ToolResult | None:
+        payload = self._base_payload(HookEvent.PRE_TOOL_USE)
+        payload["tool_name"] = call.name
+        payload["tool_input"] = self._tool_input_payload(call)
+        result = await self._dispatch_hook(HookEvent.PRE_TOOL_USE, payload)
+        if not result.blocked:
+            return None
+        return ToolResult(
+            tool_call_id=call.id,
+            content=f"[hook {result.blocking_hook_name}] {result.reason}",
+            is_error=True,
+        )
+
+    async def _post_tool_hook(self, call: ToolCall, result: ToolResult) -> None:
+        payload = self._base_payload(HookEvent.POST_TOOL_USE)
+        payload["tool_name"] = call.name
+        payload["tool_input"] = self._tool_input_payload(call)
+        payload["tool_result"] = result.content
+        payload["is_error"] = result.is_error
+        await self._dispatch_hook(HookEvent.POST_TOOL_USE, payload)
+
+    @staticmethod
+    def _tool_input_payload(call: ToolCall) -> object:
+        try:
+            return _json.loads(call.input or "{}")
+        except Exception:
+            return call.input or ""
+
     async def _execute_batched(
         self,
         calls: list[ToolCall],
-        mode: Mode,
+        mode_getter: Callable[[], Mode],
         cancel: asyncio.Event,
         state: _ExecutionState,
     ) -> AsyncIterator[Event]:
@@ -479,8 +570,13 @@ class Agent:
                 # ① 权限检查每个 call，DENY 预填结果不纳入 gather
                 deny_indices: set[int] = set()
                 for k in range(i, j):
+                    blocked = await self._pre_tool_hook_result(calls[k])
+                    if blocked is not None:
+                        results[k] = blocked
+                        deny_indices.add(k)
+                        continue
                     if engine is not None:
-                        decision, reason = engine.check(mode, calls[k], True)
+                        decision, reason = engine.check(mode_getter(), calls[k], True)
                         if decision == Decision.DENY:
                             results[k] = ToolResult(
                                 tool_call_id=calls[k].id,
@@ -519,6 +615,7 @@ class Agent:
                             is_error=True,
                         )
                         results[k] = result
+                    await self._post_tool_hook(calls[k], result)
                     yield Event(
                         tool=ToolEvent(
                             name=calls[k].name,
@@ -535,8 +632,29 @@ class Agent:
                 outcome = Outcome.ALLOW_ONCE  # default: allow if no engine
                 decision = Decision.ALLOW
                 reason = ""
+                blocked = await self._pre_tool_hook_result(call)
+                if blocked is not None:
+                    results[i] = blocked
+                    yield Event(
+                        tool=ToolEvent(
+                            name=call.name,
+                            args=self._args_preview(call.input or "{}"),
+                            phase=Phase.START,
+                        )
+                    )
+                    yield Event(
+                        tool=ToolEvent(
+                            name=call.name,
+                            args=self._args_preview(call.input or "{}"),
+                            phase=Phase.END,
+                            result=blocked.content,
+                            is_error=True,
+                        )
+                    )
+                    i += 1
+                    continue
                 if engine is not None:
-                    decision, reason = engine.check(mode, call, False)
+                    decision, reason = engine.check(mode_getter(), call, False)
 
                 if decision == Decision.DENY:
                     results[i] = ToolResult(
@@ -643,6 +761,7 @@ class Agent:
                     pass  # START 已在上方发出
                 results[i] = await self._run_one(call)
                 await self._record_read_file(call, results[i])
+                await self._post_tool_hook(call, results[i])
                 yield Event(
                     tool=ToolEvent(
                         name=call.name,

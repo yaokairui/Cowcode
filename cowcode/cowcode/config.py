@@ -19,6 +19,7 @@ __all__ = [
     "ProviderConfig",
     "load",
     "load_configs",
+    "resolve_config_path",
     "ConfigError",
     "effective_context_window",
 ]
@@ -76,6 +77,12 @@ def effective_context_window(provider: ProviderConfig) -> int:
     if provider.protocol == "openai":
         return DEFAULT_OPENAI_CONTEXT_WINDOW
     return DEFAULT_ANTHROPIC_CONTEXT_WINDOW
+
+
+def resolve_config_path(path: str = "config.yaml") -> Path:
+    """返回实际使用的配置文件路径。"""
+
+    return _resolve_config_path(path)
 
 
 def load_configs(path: str = "config.yaml") -> tuple[Config, list[ProviderConfig]]:

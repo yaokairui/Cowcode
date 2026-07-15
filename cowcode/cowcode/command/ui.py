@@ -2,9 +2,22 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol
 
 from cowcode.permission import Mode
+from cowcode.session import Message
+
+if TYPE_CHECKING:
+    from cowcode.hook.rule import Rule
+
+
+@dataclass(frozen=True, slots=True)
+class SkillSummary:
+    name: str
+    description: str
+    source: str = ""
+    mode: str = ""
 
 
 class UI(Protocol):
@@ -24,8 +37,16 @@ class UI(Protocol):
     def quit(self) -> None: ...
     def force_compact(self) -> None: ...
     def open_resume_menu(self) -> None: ...
-    def clear_and_new_session(self) -> None: ...
+    async def clear_and_new_session(self) -> None: ...
     def idle(self) -> bool: ...
+    def list_catalog_skills(self) -> list[SkillSummary]: ...
+    def list_active_skills(self) -> list[str]: ...
+    def clear_active_skills(self) -> None: ...
+    def hook_sources(self) -> list[str]: ...
+    def hook_rules(self) -> list["Rule"]: ...
+    async def append_assistant_message(self, text: str) -> None: ...
+    def recent_messages(self, n: int) -> list[Message]: ...
+    def all_messages(self) -> list[Message]: ...
 
 
 class NopUI:
@@ -79,8 +100,32 @@ class NopUI:
     def open_resume_menu(self) -> None:
         pass
 
-    def clear_and_new_session(self) -> None:
+    async def clear_and_new_session(self) -> None:
         pass
 
     def idle(self) -> bool:
         return True
+
+    def list_catalog_skills(self) -> list[SkillSummary]:
+        return []
+
+    def list_active_skills(self) -> list[str]:
+        return []
+
+    def clear_active_skills(self) -> None:
+        pass
+
+    def hook_sources(self) -> list[str]:
+        return []
+
+    def hook_rules(self) -> list["Rule"]:
+        return []
+
+    async def append_assistant_message(self, text: str) -> None:
+        pass
+
+    def recent_messages(self, n: int) -> list[Message]:
+        return []
+
+    def all_messages(self) -> list[Message]:
+        return []

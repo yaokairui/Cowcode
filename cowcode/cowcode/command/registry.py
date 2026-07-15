@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from cowcode.command.command import Command
 
 
@@ -24,6 +26,18 @@ class Registry:
         if not cmd.hidden:
             self._visible.append(cmd)
             self._visible.sort(key=lambda item: item.name)
+
+    def remove_if(self, pred: Callable[[Command], bool]) -> None:
+        """按条件移除命令及其别名。"""
+
+        removed_ids = {id(cmd) for cmd in self._visible if pred(cmd)}
+        removed_ids.update(id(cmd) for cmd in self._by_name.values() if pred(cmd))
+        if not removed_ids:
+            return
+        self._by_name = {
+            key: cmd for key, cmd in self._by_name.items() if id(cmd) not in removed_ids
+        }
+        self._visible = [cmd for cmd in self._visible if id(cmd) not in removed_ids]
 
     def lookup(self, name: str) -> Command | None:
         return self._by_name.get(name.lower())

@@ -32,3 +32,4 @@ class Command:
     handler: Handler
     aliases: list[str] = field(default_factory=list)
     hidden: bool = False
+    is_skill: bool = False

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 
 import yaml
 
@@ -41,19 +42,23 @@ def _normalize_list(value: object) -> list[str]:
 
 
 def to_rule_set(settings: Settings) -> RuleSet:
-    """把配置转向 RuleSet，跳过非法条目。"""
-    from cowcode.permission import _parse_rule
+    """把配置转向 RuleSet；失败 rule 打 stderr 后跳过，其它 rule 不受影响。"""
+    from cowcode.permission import parse_rule
 
     rule_set = RuleSet()
     for text in settings.permissions.allow:
-        rule, ok = _parse_rule(text)
-        if ok and rule.tool:
-            rule_set.allow.append(rule)
+        rule, err = parse_rule(text)
+        if err is not None or rule is None:
+            print(f"rule {text!r} parse failed: {err}", file=sys.stderr)
+            continue
+        rule_set.allow.append(rule)
     for text in settings.permissions.deny:
-        rule, ok = _parse_rule(text)
-        if ok and rule.tool:
-            rule.allow = False
-            rule_set.deny.append(rule)
+        rule, err = parse_rule(text)
+        if err is not None or rule is None:
+            print(f"rule {text!r} parse failed: {err}", file=sys.stderr)
+            continue
+        rule.allow = False
+        rule_set.deny.append(rule)
     return rule_set
 
 

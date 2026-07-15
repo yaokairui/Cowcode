@@ -17,12 +17,13 @@ EXPECTED = {
     "do",
     "exit",
     "help",
+    "hooks",
     "memory",
     "permission",
     "plan",
     "resume",
-    "review",
     "session",
+    "skill",
     "status",
 }
 
@@ -59,7 +60,7 @@ def test_register_builtins_all_registered() -> None:
     reg = Registry()
     register_builtins(reg)
     assert {cmd.name for cmd in reg.visible()} == EXPECTED
-    assert len(reg.visible()) == 12
+    assert len(reg.visible()) == 13
 
 
 def test_register_builtins_no_collision() -> None:

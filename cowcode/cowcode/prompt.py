@@ -4,12 +4,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from cowcode.prompt_skills import (
+    ActiveSkillEntry,
+    SkillCatalogItem,
+    render_active_skills_block,
+    render_skills_catalog,
+)
+
 __all__ = [
+    "ActiveSkillEntry",
     "CAT_BANNER",
     "DEFAULT_SYSTEM_PROMPT",
     "EXECUTE_DIRECTIVE",
     "Module",
     "PLAN_REMINDER_INTERVAL",
+    "SkillCatalogItem",
     "SYSTEM_PROMPT",
     "assemble_system",
     "build_system_prompt",
@@ -17,7 +26,9 @@ __all__ = [
     "get_system_prompt",
     "optional_modules",
     "plan_reminder",
+    "render_active_skills_block",
     "render_banner",
+    "render_skills_catalog",
     "system_reminder",
 ]
 
@@ -38,7 +49,7 @@ class Module:
 
 
 def fixed_modules() -> list[Module]:
-    """返回七个固定系统模块。"""
+    """返回固定系统模块。"""
     return [
         Module(
             "identity", 10, "You are Cowcode, a coding agent running in a terminal."
@@ -64,7 +75,7 @@ def fixed_modules() -> list[Module]:
             "Prefer read_file, glob, and grep over assembling equivalent shell commands. "
             "Before editing a file, you must read it first. "
             "When requirements are unclear, use AskUserQuestion to ask the user for clarification "
-            "before proceeding — ask only the most critical questions, and continue after receiving the answer.",
+            "before proceeding; ask only the most critical questions, and continue after receiving the answer.",
         ),
         Module("style", 60, "Be concise, direct, honest, and avoid flattery."),
         Module(
@@ -79,14 +90,15 @@ def optional_modules(
     custom_prompt: str = "",
     instructions: str = "",
     memory: str = "",
+    skills_catalog: str = "",
 ) -> list[Module]:
-    """返回三个可选槽；空内容由装配器跳过。"""
+    """返回可选槽；空内容由装配器跳过。"""
     custom_parts = [
         part.strip() for part in (custom_prompt, instructions) if part.strip()
     ]
     return [
         Module("custom_instructions", 80, "\n\n".join(custom_parts)),
-        Module("active_skills", 90, ""),
+        Module("skills_catalog", 90, skills_catalog),
         Module("long_term_memory", 100, memory),
     ]
 
@@ -103,10 +115,12 @@ def build_system_prompt(
     custom_prompt: str = "",
     instructions: str = "",
     memory: str = "",
+    skills_catalog: str = "",
 ) -> str:
     """构造跨轮稳定的完整系统提示。"""
     return assemble_system(
-        fixed_modules() + optional_modules(custom_prompt, instructions, memory)
+        fixed_modules()
+        + optional_modules(custom_prompt, instructions, memory, skills_catalog)
     )
 
 
@@ -118,7 +132,7 @@ EXECUTE_DIRECTIVE = "请按上面的计划开始执行。"
 _PLAN_FULL = (
     "You are in PLAN MODE. Use only read-only tools (read_file, glob, grep, AskUserQuestion) "
     "to investigate and clarify. If requirements are unclear or ambiguous, call AskUserQuestion "
-    "to ask the user for clarification before making assumptions — focus on the most critical "
+    "to ask the user for clarification before making assumptions; focus on the most critical "
     "unknowns that block planning. Do not modify files or run shell commands. Produce a clear "
     "step-by-step plan, then wait for the user to approve it with /do."
 )

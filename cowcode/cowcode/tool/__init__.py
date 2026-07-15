@@ -43,6 +43,11 @@ class Tool(Protocol):
         """True=只读工具，可并发执行 & Plan Mode 放行。"""
         ...
 
+    @property
+    def is_system(self) -> bool:
+        """系统工具永远对模型可见，不受 Skill allowed_tools 过滤。"""
+        ...
+
     async def execute(self, args: str) -> Result: ...
 
 
@@ -59,6 +64,9 @@ class Registry:
             self._order.append(name)
         self._tools[name] = tool
 
+    def register_skill_tool(self, tool: Tool) -> None:
+        self.register(tool)
+
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
 
@@ -66,25 +74,22 @@ class Registry:
         return len(self._tools)
 
     def definitions(self) -> list[ToolDefinition]:
-        return [
-            ToolDefinition(
-                name=name,
-                description=self._tools[name].description(),
-                input_schema=self._tools[name].parameters(),
-            )
-            for name in self._order
-        ]
+        return [self._definition(name) for name in self._order]
 
     def read_only_definitions(self) -> list[ToolDefinition]:
         """Plan Mode：仅导出 read_only==True 的工具定义，保留注册顺序。"""
         return [
-            ToolDefinition(
-                name=name,
-                description=self._tools[name].description(),
-                input_schema=self._tools[name].parameters(),
-            )
+            self._definition(name)
             for name in self._order
             if self._tools[name].read_only is True
+        ]
+
+    def definitions_filtered(self, allowed: list[str]) -> list[ToolDefinition]:
+        allowed_set = set(allowed)
+        return [
+            self._definition(name)
+            for name in self._order
+            if name in allowed_set or self._is_system_tool(name)
         ]
 
     def is_read_only(self, name: str) -> bool:
@@ -108,6 +113,16 @@ class Registry:
         except Exception as exc:
             return Result(content=f"Tool {name} failed: {exc}", is_error=True)
 
+    def _definition(self, name: str) -> ToolDefinition:
+        return ToolDefinition(
+            name=name,
+            description=self._tools[name].description(),
+            input_schema=self._tools[name].parameters(),
+        )
+
+    def _is_system_tool(self, name: str) -> bool:
+        return bool(getattr(self._tools[name], "is_system", False))
+
 
 def truncate_text(text: str, max_lines: int, max_chars: int) -> str:
     """按行数和字符数截断工具结果。"""
@@ -126,7 +141,7 @@ def truncate_text(text: str, max_lines: int, max_chars: int) -> str:
 
 
 def new_default_registry() -> Registry:
-    """构造默认工具集——含 6 个文件工具 + AskUserQuestion 澄清工具。"""
+    """构造默认工具集。"""
     from cowcode.tool.ask_user_question import AskUserQuestionTool
     from cowcode.tool.bash import BashTool
     from cowcode.tool.edit_file import EditFileTool

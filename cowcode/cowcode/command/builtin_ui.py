@@ -30,5 +30,6 @@ async def handle_resume(ui: UI) -> None:
 
 
 async def handle_clear(ui: UI) -> None:
-    ui.clear_and_new_session()
+    ui.clear_active_skills()
+    await ui.clear_and_new_session()
     ui.println("已清空当前会话，开启新 session")

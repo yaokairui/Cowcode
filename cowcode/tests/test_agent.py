@@ -16,6 +16,10 @@ from cowcode.agent import (
     Agent,
     Phase,
 )
+from cowcode.hook.engine import Engine as HookEngine
+from cowcode.hook.event import Event as HookEvent
+from cowcode.hook.executor import ExecutionResult
+from cowcode.hook.rule import ActionType, PromptAction, Rule as HookRule, ShellAction
 from cowcode.permission import Mode
 from cowcode.prompt import plan_reminder
 from cowcode.provider import Request
@@ -742,3 +746,125 @@ async def test_plan_mode_includes_ask_user_question() -> None:
     assert "AskUserQuestion" in names
     assert "read_file" in names
     assert "bash" not in names
+
+
+class FakeHookExecutor:
+    def __init__(self, outcomes: list[ExecutionResult]) -> None:
+        self.outcomes = outcomes
+        self.calls: list[str] = []
+
+    async def run(self, rule: HookRule, payload, *, blocking: bool) -> ExecutionResult:
+        self.calls.append(rule.name)
+        if self.outcomes:
+            return self.outcomes.pop(0)
+        return ExecutionResult()
+
+
+def _hook_rule(
+    name: str,
+    event: HookEvent,
+    action_type: ActionType = ActionType.PROMPT,
+    action=None,
+) -> HookRule:
+    if action is None:
+        action = PromptAction(name)
+    return HookRule(
+        name=name,
+        event=event,
+        condition=None,
+        action_type=action_type,
+        action=action,
+    )
+
+
+@pytest.mark.asyncio
+async def test_pre_tool_use_hook_block_returns_tool_result_and_events() -> None:
+    registry = Registry()
+    tool = FakeTool("bash")
+    registry.register(tool)
+    provider = FakeProvider(
+        scripts=[
+            [_tool_call("bash", json.dumps({"command": "echo hi"}), call_id="c1"), _done()],
+            [_text("done"), _done()],
+        ]
+    )
+    hook_engine = HookEngine(
+        [
+            _hook_rule(
+                "deny-bash",
+                HookEvent.PRE_TOOL_USE,
+                ActionType.SHELL,
+                ShellAction("unused"),
+            )
+        ],
+        [],
+    )
+    hook_engine._executor = FakeHookExecutor(
+        [ExecutionResult(blocked=True, reason="blocked")]
+    )
+    session = Session()
+    session.append("user", "run bash")
+
+    events = [
+        ev
+        async for ev in Agent(provider, registry, hook_engine=hook_engine).run(
+            session, Mode.DEFAULT, asyncio.Event()
+        )
+    ]
+
+    assert tool.calls == []
+    tool_events = [ev.tool for ev in events if ev.tool is not None]
+    assert [(ev.name, ev.phase, ev.is_error) for ev in tool_events[:2]] == [
+        ("bash", Phase.START, False),
+        ("bash", Phase.END, True),
+    ]
+    tool_msg = next(msg for msg in session.messages if msg.role == "tool")
+    assert tool_msg.tool_results[0].content == "[hook deny-bash] blocked"
+    assert tool_msg.tool_results[0].is_error is True
+
+
+@pytest.mark.asyncio
+async def test_pre_user_message_prompt_is_injected_into_same_request_reminder() -> None:
+    registry = Registry()
+    provider = FakeProvider(
+        scripts=[[_text("ok"), _done()]],
+        record_streams=True,
+    )
+    hook_engine = HookEngine(
+        [_hook_rule("inject", HookEvent.PRE_USER_MESSAGE)],
+        [],
+    )
+    hook_engine._executor = FakeHookExecutor([ExecutionResult(prompt="remember zh-CN")])
+    session = Session()
+    session.append("user", "hello")
+
+    events = [
+        ev
+        async for ev in Agent(provider, registry, hook_engine=hook_engine).run(
+            session, Mode.DEFAULT, asyncio.Event()
+        )
+    ]
+
+    assert events[-1].done
+    assert provider.captured_requests[0].reminder == "remember zh-CN"
+
+
+@pytest.mark.asyncio
+async def test_stop_hook_runs_before_done_event() -> None:
+    registry = Registry()
+    provider = FakeProvider(scripts=[[_text("ok"), _done()]])
+    hook_engine = HookEngine([_hook_rule("stop", HookEvent.STOP)], [])
+    fake_executor = FakeHookExecutor([ExecutionResult()])
+    hook_engine._executor = fake_executor
+    session = Session()
+    session.append("user", "hello")
+
+    events = [
+        ev
+        async for ev in Agent(provider, registry, hook_engine=hook_engine).run(
+            session, Mode.DEFAULT, asyncio.Event()
+        )
+    ]
+
+    assert events[-1].done
+    assert fake_executor.calls == ["stop"]
