@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from cowcode.tool import Result
+from cowcode.tool.ctx import resolve_path
 
 
 class EditFileTool:
@@ -52,7 +53,7 @@ class EditFileTool:
         if not isinstance(new, str):
             return Result("Missing required argument: new_string", is_error=True)
 
-        path = Path(path_value)
+        path = Path(resolve_path(path_value))
         try:
             content = path.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:

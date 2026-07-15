@@ -19,6 +19,7 @@ from cowcode.command.builtin_ui import (
     handle_plan,
     handle_resume,
 )
+from cowcode.command.builtin_worktree import _noop, handle_worktree
 from cowcode.command.command import Command, Kind
 from cowcode.command.registry import Registry
 
@@ -40,6 +41,7 @@ def register_builtins(reg: Registry) -> None:
         Command("session", "显示当前会话信息", Kind.LOCAL, handle_session),
         Command("skill", "列出已加载的 Skill", Kind.LOCAL, handle_skill),
         Command("status", "显示当前运行状态", Kind.LOCAL, handle_status),
+        Command("worktree", "管理 Git Worktree 隔离副本", Kind.LOCAL, _noop, args_handler=handle_worktree, hidden=True),
     ]
     for cmd in commands:
         reg.register(cmd)

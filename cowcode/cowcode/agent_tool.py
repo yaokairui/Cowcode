@@ -10,6 +10,7 @@ from typing import Callable
 
 import cowcode.run_to_completion  # noqa: F401  # 注册 Agent.run_to_completion
 from cowcode.agent import Agent, Event
+from cowcode.agent_worktree import execute_with_worktree
 from cowcode.compact import (
     AutoCompactTrackingState,
     ContentReplacementState,
@@ -23,6 +24,7 @@ from cowcode.subagent import Catalog, Definition
 from cowcode.task_manager import Manager, PartialState
 from cowcode.tool import Registry, Result
 from cowcode.tool.filter import FilterParams, apply_agent_tool_filter
+from cowcode.worktree import Manager as WorktreeManager
 
 AUTO_BACKGROUND_SECONDS = 120.0
 
@@ -46,6 +48,7 @@ class AgentTool:
         parent_getter: Callable[[], Agent | None],
         messages_getter: Callable[[], list],
         bg_enabled: bool = True,
+        worktree_mgr: WorktreeManager | None = None,
     ) -> None:
         self._catalog = catalog
         self._task_manager = task_manager
@@ -53,6 +56,7 @@ class AgentTool:
         self._parent_getter = parent_getter
         self._messages_getter = messages_getter
         self._bg_enabled = bg_enabled
+        self.worktree_mgr = worktree_mgr
 
     @property
     def read_only(self) -> bool:
@@ -110,6 +114,8 @@ class AgentTool:
             definition = self._catalog.fork_definition()
 
         background = definition.background or parsed.run_in_background or definition.is_fork()
+        if definition.isolation == "worktree":
+            background = False
         if background and not self._bg_enabled:
             return Result("后台禁用,无法 Fork", is_error=True)
 
@@ -135,7 +141,17 @@ class AgentTool:
         events: asyncio.Queue[Event | None] = asyncio.Queue(maxsize=64)
         partial = PartialState()
         aggregator = asyncio.create_task(_aggregate_partial(events, partial))
-        handle = asyncio.create_task(sub_agent.run_to_completion(sub_session, parsed.prompt, events))  # type: ignore[attr-defined]
+        if definition.isolation == "worktree":
+            if self.worktree_mgr is None:
+                aggregator.cancel()
+                with suppress(asyncio.CancelledError):
+                    await aggregator
+                return Result("worktree manager not configured", is_error=True)
+            handle = asyncio.create_task(
+                execute_with_worktree(self.worktree_mgr, sub_agent, sub_session, parsed.prompt, events)
+            )
+        else:
+            handle = asyncio.create_task(sub_agent.run_to_completion(sub_session, parsed.prompt, events))  # type: ignore[attr-defined]
         try:
             final_text = await asyncio.wait_for(
                 asyncio.shield(handle), timeout=AUTO_BACKGROUND_SECONDS

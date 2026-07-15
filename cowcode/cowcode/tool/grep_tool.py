@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 
 from cowcode.tool import Result
+from cowcode.tool.ctx import resolve_path
 
 _MAX_RESULTS = 100
 _MAX_LINE_LENGTH = 1_000_000
@@ -56,7 +57,7 @@ class GrepTool:
         except re.error as exc:
             return Result(f"Invalid regex: {exc}", is_error=True)
 
-        root = Path(root_value)
+        root = Path(resolve_path(root_value))
         matches: list[str] = []
         files = root.rglob(glob_pattern) if root.is_dir() else [root]
         for file_index, path in enumerate(files, 1):

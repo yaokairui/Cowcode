@@ -27,3 +27,7 @@ build/
 
 # Session spill files
 .cowcode/sessions/
+
+# ch14: Worktree isolation copies
+.cowcode/worktrees/
+.cowcode/worktree_session.json

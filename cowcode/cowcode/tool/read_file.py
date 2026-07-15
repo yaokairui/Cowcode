@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from cowcode.tool import Result, truncate_text
+from cowcode.tool.ctx import resolve_path
 
 
 class ReadFileTool:
@@ -41,7 +42,7 @@ class ReadFileTool:
         if not isinstance(path_value, str) or not path_value:
             return Result("Missing required argument: path", is_error=True)
 
-        path = Path(path_value)
+        path = Path(resolve_path(path_value))
         if not path.exists():
             return Result(f"File not found: {path}", is_error=True)
         if path.is_dir():

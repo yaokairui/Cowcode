@@ -6,6 +6,7 @@ import asyncio
 import json
 
 from cowcode.tool import Result, truncate_text
+from cowcode.tool.ctx import resolve_path
 
 
 class BashTool:
@@ -46,6 +47,7 @@ class BashTool:
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            cwd=resolve_path(""),
         )
         try:
             stdout_b, stderr_b = await proc.communicate()

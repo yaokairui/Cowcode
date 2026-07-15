@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from cowcode.tool import Result
+from cowcode.tool.ctx import resolve_path
 
 
 class GlobTool:
@@ -43,7 +44,7 @@ class GlobTool:
         if not isinstance(root_value, str):
             return Result("Argument path must be a string", is_error=True)
 
-        root = Path(root_value)
+        root = Path(resolve_path(root_value))
         try:
             matches: list[str] = []
             for index, candidate in enumerate(root.glob(pattern), 1):

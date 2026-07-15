@@ -15,6 +15,7 @@ from cowcode.subagent.definition import Definition, Source
 UTF8_BOM = "﻿"
 AGENT_NAME_REGEX = re.compile(r"^[A-Za-z][A-Za-z0-9\-_]{0,31}$")
 _VALID_MODELS = {"", "inherit", "haiku", "sonnet", "opus"}
+_VALID_ISOLATION = {"", "worktree"}
 
 
 def parse_frontmatter_and_body(data: str) -> tuple[dict[str, Any], str]:
@@ -63,6 +64,13 @@ def parse_definition(data: bytes, file_path: str, source: Source) -> Definition:
     permission_mode, dont_ask = _parse_permission_mode(
         str(fm.get("permissionMode") or "default"), name
     )
+    isolation = str(fm.get("isolation") or "").strip()
+    if isolation not in _VALID_ISOLATION:
+        print(
+            f"agent {name}: unknown isolation {isolation!r}, defaulting to none",
+            file=sys.stderr,
+        )
+        isolation = ""
 
     return Definition(
         name=name,
@@ -74,6 +82,7 @@ def parse_definition(data: bytes, file_path: str, source: Source) -> Definition:
         permission_mode=permission_mode,
         dont_ask=dont_ask,
         background=bool(fm.get("background") or False),
+        isolation=isolation,
         system_prompt=body,
         file_path=file_path,
         source=source,

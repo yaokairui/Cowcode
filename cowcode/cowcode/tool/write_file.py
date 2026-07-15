@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from cowcode.tool import Result
+from cowcode.tool.ctx import resolve_path
 
 
 class WriteFileTool:
@@ -42,7 +43,7 @@ class WriteFileTool:
         if not isinstance(content, str):
             return Result("Missing required argument: content", is_error=True)
 
-        path = Path(path_value)
+        path = Path(resolve_path(path_value))
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
