@@ -195,7 +195,7 @@ def _build_subagent(
         permission_mode=definition.permission_mode,
         dont_ask=definition.dont_ask,
         approval_upgrader=manager.upgrade_approval,
-        include_system_tools=False,
+        include_system_tools=definition.is_fork(),
     )
 
 

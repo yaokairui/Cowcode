@@ -30,7 +30,7 @@ from cowcode.agent import (
     Phase,
 )
 from cowcode.command import Kind, Registry as CommandRegistry, parse, register_builtins
-from cowcode.command import SkillSummary, register_skills_as_commands, remove_skill_commands
+from cowcode.command import SkillSummary, WorktreeAccessor, register_skills_as_commands, remove_skill_commands
 from cowcode.completion import CompletionMenu
 from cowcode.config import (
     Config,
@@ -42,6 +42,9 @@ from cowcode.config import (
 )
 from cowcode.agent_tool import AgentTool
 from cowcode.environment import gather_environment
+from cowcode.tool.ctx import with_cwd
+from cowcode.worktree_adapter import WorktreeAdapter
+from cowcode import worktree
 from cowcode import hook, mcp as mcp_client
 from cowcode.hook import Event as HookEvent
 from cowcode.hook.rule import Rule as HookRule
@@ -404,6 +407,7 @@ class CowcodeApp(App[Any]):
         hook_engine: object | None = None,
         task_manager: TaskManager | None = None,
         agent_tool: AgentTool | None = None,
+        worktree_mgr: worktree.Manager | None = None,
     ) -> None:
         super().__init__()
         self._providers = providers
@@ -433,6 +437,12 @@ class CowcodeApp(App[Any]):
         self.hook_engine = hook_engine
         self.task_manager = task_manager or TaskManager()
         self._agent_tool = agent_tool
+        self.worktree_mgr = worktree_mgr
+        self.active_cwd = ""
+        if self.worktree_mgr is not None:
+            session = self.worktree_mgr.current_session()
+            if session is not None:
+                self.active_cwd = session.worktree_path
         self._runtime.hook_engine = hook_engine
         self._session: Session | None = None
         self._full_response = ""
@@ -901,7 +911,18 @@ class CowcodeApp(App[Any]):
         )
 
     def cwd(self) -> str:
-        return str(Path.cwd())
+        return self.active_cwd or str(Path.cwd())
+
+    def worktree_accessor(self) -> WorktreeAccessor | None:
+        if self.worktree_mgr is None:
+            return None
+        return WorktreeAdapter(self.worktree_mgr, self._set_active_cwd)
+
+    def _set_active_cwd(self, cwd: str) -> None:
+        self.active_cwd = cwd
+
+    def _effective_cwd(self) -> str:
+        return self.active_cwd or str(Path.cwd())
 
     def tool_count(self) -> int:
         return self._tool_registry.count()
@@ -989,7 +1010,14 @@ class CowcodeApp(App[Any]):
             return False
         self._refresh_skill_commands()
         self._pending_println.clear()
+        raw_tail = text.strip()[1:].strip()
+        raw_name, _, raw_args = raw_tail.partition(" ")
         cmd = self._cmd_registry.lookup(name)
+        if cmd is None and raw_args.strip():
+            candidate = self._cmd_registry.lookup(raw_name.lower())
+            if candidate is not None and candidate.args_handler is not None:
+                name = raw_name.lower()
+                cmd = candidate
         skill_invocation = self._parse_skill_invocation(text)
         if skill_invocation is not None and (cmd is None or cmd.is_skill):
             skill_name, skill_args = skill_invocation
@@ -1005,7 +1033,11 @@ class CowcodeApp(App[Any]):
             self.error("请等待当前任务完成")
         else:
             try:
-                await cmd.handler(self)
+                if cmd.args_handler is not None:
+                    _, _, command_args = user_text.strip()[1:].partition(" ")
+                    await cmd.args_handler(self, command_args.strip())
+                else:
+                    await cmd.handler(self)
             except Exception as exc:
                 self.error(str(exc))
         for kind, msg in self._pending_println:
@@ -1346,96 +1378,97 @@ class CowcodeApp(App[Any]):
     async def _consume_agent_events(self, agent: Agent, mode: Mode) -> None:
         """消费 Agent 事件流——由 Textual worker 驱动。"""
         try:
-            async for event in agent.run(
-                self._session, mode, self._turn_cancel, mode_getter=lambda: self._mode
-            ):
-                if event.err is not None:
-                    self._print_error(str(event.err))
-                    break
-                if event.compact is not None:
-                    self._print_notice(format_compact_notice(event.compact))
-                    continue
-                if event.text:
-                    self._full_response += event.text
-                    self._set_streaming_response(self._full_response)
-                if event.tool is not None:
-                    # 首个工具前先提交 preamble
-                    if self._full_response and event.tool.phase == Phase.START:
-                        # 只在没多个工具追加时才提交（提交只在第一次工具出现时做）
-                        pass
-                    if event.tool.phase == Phase.START:
-                        if self._full_response:
-                            self._conversation.write("")
-                            self._conversation.write(
-                                Text("Cowcode:", style="bold yellow")
+            with with_cwd(self._effective_cwd()):
+                async for event in agent.run(
+                    self._session, mode, self._turn_cancel, mode_getter=lambda: self._mode
+                ):
+                    if event.err is not None:
+                        self._print_error(str(event.err))
+                        break
+                    if event.compact is not None:
+                        self._print_notice(format_compact_notice(event.compact))
+                        continue
+                    if event.text:
+                        self._full_response += event.text
+                        self._set_streaming_response(self._full_response)
+                    if event.tool is not None:
+                        # 首个工具前先提交 preamble
+                        if self._full_response and event.tool.phase == Phase.START:
+                            # 只在没多个工具追加时才提交（提交只在第一次工具出现时做）
+                            pass
+                        if event.tool.phase == Phase.START:
+                            if self._full_response:
+                                self._conversation.write("")
+                                self._conversation.write(
+                                    Text("Cowcode:", style="bold yellow")
+                                )
+                                self._conversation.write(Markdown(self._full_response))
+                                self._full_response = ""
+                                self._set_streaming_response("")
+                            self._cur_tools.append(
+                                ToolDisplay(event.tool.name, event.tool.args)
                             )
-                            self._conversation.write(Markdown(self._full_response))
-                            self._full_response = ""
-                            self._set_streaming_response("")
-                        self._cur_tools.append(
-                            ToolDisplay(event.tool.name, event.tool.args)
-                        )
-                        self._print_tool_start(event.tool.name, event.tool.args)
+                            self._print_tool_start(event.tool.name, event.tool.args)
+                            self._update_timer_display()
+                        else:
+                            # PHASE_END：FIFO 弹出队首
+                            if self._cur_tools:
+                                self._cur_tools.pop(0)
+                            self._print_tool_result(event.tool.result, event.tool.is_error)
+                            self._update_timer_display()
+                    if event.usage is not None:
+                        self._usage_in += event.usage.input_tokens
+                        self._usage_out += event.usage.output_tokens
+                        self._update_status_bar()
+                    if event.iter > 0:
+                        self._iter = event.iter
                         self._update_timer_display()
-                    else:
-                        # PHASE_END：FIFO 弹出队首
-                        if self._cur_tools:
-                            self._cur_tools.pop(0)
-                        self._print_tool_result(event.tool.result, event.tool.is_error)
-                        self._update_timer_display()
-                if event.usage is not None:
-                    self._usage_in += event.usage.input_tokens
-                    self._usage_out += event.usage.output_tokens
-                    self._update_status_bar()
-                if event.iter > 0:
-                    self._iter = event.iter
-                    self._update_timer_display()
-                if event.notice:
-                    self._print_notice(event.notice)
-                if event.done:
-                    break
-                if event.approval is not None:
-                    # 权限 Ask——人在回路审批弹窗
-                    self._pending_approval = event.approval
-                    self._approve_cursor = 0
-                    self._ask_user_mode = mode
-                    options = [
-                        "1. 允许本次",
-                        "2. 永久允许（写入本地配置）",
-                        "3. 拒绝本次",
-                    ]
-                    self.push_screen(
-                        AskUserQuestionScreen(
-                            f"{event.approval.name}({event.approval.args})\n{event.approval.reason}",
-                            options,
-                        ),
-                        callback=self._on_approval_answer,
-                    )
-                if event.ask_user is not None:
-                    # 弹窗让用户选择或自定义输入
-                    self._pending_question = event.ask_user
-                    self._ask_user_mode = mode
-                    if event.ask_user.options:
+                    if event.notice:
+                        self._print_notice(event.notice)
+                    if event.done:
+                        break
+                    if event.approval is not None:
+                        # 权限 Ask——人在回路审批弹窗
+                        self._pending_approval = event.approval
+                        self._approve_cursor = 0
+                        self._ask_user_mode = mode
+                        options = [
+                            "1. 允许本次",
+                            "2. 永久允许（写入本地配置）",
+                            "3. 拒绝本次",
+                        ]
                         self.push_screen(
                             AskUserQuestionScreen(
-                                event.ask_user.question, event.ask_user.options
+                                f"{event.approval.name}({event.approval.args})\n{event.approval.reason}",
+                                options,
                             ),
-                            callback=self._on_user_answer,
+                            callback=self._on_approval_answer,
                         )
-                    else:
-                        self._conversation.write("")
-                        self._conversation.write(Text("Cowcode:", style="bold yellow"))
-                        self._conversation.write(
-                            Markdown(f"**❓ {event.ask_user.question}**")
-                        )
-                        self._conversation.write(
-                            Text(
-                                "\n请在输入框中回答后按 Enter 继续…",
-                                style="italic",
+                    if event.ask_user is not None:
+                        # 弹窗让用户选择或自定义输入
+                        self._pending_question = event.ask_user
+                        self._ask_user_mode = mode
+                        if event.ask_user.options:
+                            self.push_screen(
+                                AskUserQuestionScreen(
+                                    event.ask_user.question, event.ask_user.options
+                                ),
+                                callback=self._on_user_answer,
                             )
-                        )
-                        self._input.focus()
-                    break
+                        else:
+                            self._conversation.write("")
+                            self._conversation.write(Text("Cowcode:", style="bold yellow"))
+                            self._conversation.write(
+                                Markdown(f"**❓ {event.ask_user.question}**")
+                            )
+                            self._conversation.write(
+                                Text(
+                                    "\n请在输入框中回答后按 Enter 继续…",
+                                    style="italic",
+                                )
+                            )
+                            self._input.focus()
+                        break
         finally:
             self._is_streaming = False
             self._stop_timer()
@@ -1540,6 +1573,16 @@ async def _amain() -> int:
             engine=engine,
             memory_manager=mem_mgr,
         )
+        try:
+            worktree_mgr = worktree.Manager(root)
+        except Exception as exc:
+            print(f"Worktree 管理器降级: {exc}", file=sys.stderr)
+            worktree_mgr = None
+        else:
+            asyncio.create_task(
+                worktree_mgr.sweep_stale(datetime.now() - timedelta(hours=24))  # type: ignore[attr-defined]
+            )
+
         app_ref: dict[str, CowcodeApp] = {}
         agent_tool = AgentTool(
             subagent_catalog,
@@ -1548,6 +1591,7 @@ async def _amain() -> int:
             parent_getter=lambda: app_ref["app"]._ensure_agent() if "app" in app_ref else None,
             messages_getter=lambda: app_ref["app"].all_messages() if "app" in app_ref else [],
             bg_enabled=config.effective_enable_subagent_background(),
+            worktree_mgr=worktree_mgr,
         )
         registry.register(agent_tool)
         app = CowcodeApp(
@@ -1566,6 +1610,7 @@ async def _amain() -> int:
             hook_engine=hook_engine,
             task_manager=task_manager,
             agent_tool=agent_tool,
+            worktree_mgr=worktree_mgr,
         )
         app_ref["app"] = app
         await app.run_async()
