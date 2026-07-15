@@ -166,6 +166,7 @@ class Agent:
             [ApprovalRequest], Awaitable[tuple[Outcome, bool]]
         ] | None = None,
         include_system_tools: bool = True,
+        ctx: dict[str, Any] | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -190,7 +191,19 @@ class Agent:
         self._dont_ask = dont_ask
         self._approval_upgrader = approval_upgrader
         self._include_system_tools = include_system_tools
+        self._ctx = dict(ctx or {})
         self._run_lock = asyncio.Lock()
+
+    def set_permission_mode(self, mode: Mode) -> None:
+        self._permission_mode = mode
+
+    def set_allowed_tools(self, allowed: list[str]) -> None:
+        self._allowed_tools = list(allowed)
+
+    def append_system_prompt(self, text: str) -> None:
+        if not text:
+            return
+        self._system_prompt = (self._system_prompt.rstrip() + "\n\n" + text).strip()
 
     async def run(
         self,
@@ -236,10 +249,14 @@ class Agent:
                         self._allowed_tools,
                         include_system=self._include_system_tools,
                     )
+                definitions = self._filter_team_tools(definitions)
                 reminder = ""
                 if current_mode == Mode.PLAN:
                     full = it == 1 or (it - 1) % PLAN_REMINDER_INTERVAL == 0
                     reminder = plan_reminder(full)
+                team_reminder = await self._ingest_team_mailbox()
+                if team_reminder:
+                    reminder = f"{reminder}\n\n{team_reminder}" if reminder else team_reminder
                 reminder = await self._build_reminder(reminder)
 
                 async with self._runtime.lock:
@@ -407,6 +424,17 @@ class Agent:
             yield Event(done=True)
 
     # ---------- 内部 ----------
+
+    def _filter_team_tools(self, definitions: list[ToolDefinition]) -> list[ToolDefinition]:
+        if self._allowed_tools:
+            return definitions
+        hidden = {"TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "SendMessage"}
+        return [definition for definition in definitions if definition.name not in hidden]
+
+    async def _ingest_team_mailbox(self) -> str:
+        from cowcode.agent_team_mailbox import ingest_team_mailbox
+
+        return await ingest_team_mailbox(self, self._ctx)
 
     async def _build_reminder(self, base: str) -> str:
         prompts = await self._runtime.take_reminders()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 
@@ -12,6 +13,10 @@ import pytest
 from cowcode.hook.executor import Executor
 from cowcode.hook.event import Event
 from cowcode.hook.rule import ActionType, HttpAction, PromptAction, Rule, ShellAction, SubagentAction
+
+
+def _py(code: str) -> str:
+    return f'{sys.executable} -c "{code}"'
 
 
 def _rule(action_type: ActionType, action, *, timeout: float = 1.0) -> Rule:
@@ -28,7 +33,10 @@ def _rule(action_type: ActionType, action, *, timeout: float = 1.0) -> Rule:
 @pytest.mark.asyncio
 async def test_shell_exit_2_blocks_with_stderr_reason() -> None:
     executor = Executor()
-    rule = _rule(ActionType.SHELL, ShellAction("sh -c 'echo blocked >&2; exit 2'"))
+    rule = _rule(
+        ActionType.SHELL,
+        ShellAction(_py("import sys; print('blocked', file=sys.stderr); raise SystemExit(2)")),
+    )
 
     result = await executor.run(rule, {"event": "PreToolUse"}, blocking=True)
 
@@ -39,7 +47,7 @@ async def test_shell_exit_2_blocks_with_stderr_reason() -> None:
 @pytest.mark.asyncio
 async def test_shell_exit_0_allows() -> None:
     executor = Executor()
-    rule = _rule(ActionType.SHELL, ShellAction("sh -c 'exit 0'"))
+    rule = _rule(ActionType.SHELL, ShellAction(_py("raise SystemExit(0)")))
 
     result = await executor.run(rule, {"event": "PreToolUse"}, blocking=True)
 
@@ -50,7 +58,10 @@ async def test_shell_exit_0_allows() -> None:
 @pytest.mark.asyncio
 async def test_shell_exit_1_is_error_not_block() -> None:
     executor = Executor()
-    rule = _rule(ActionType.SHELL, ShellAction("sh -c 'echo bad >&2; exit 1'"))
+    rule = _rule(
+        ActionType.SHELL,
+        ShellAction(_py("import sys; print('bad', file=sys.stderr); raise SystemExit(1)")),
+    )
 
     result = await executor.run(rule, {"event": "PreToolUse"}, blocking=True)
 
@@ -62,7 +73,10 @@ async def test_shell_exit_1_is_error_not_block() -> None:
 @pytest.mark.asyncio
 async def test_shell_receives_sorted_json_stdin() -> None:
     executor = Executor()
-    rule = _rule(ActionType.SHELL, ShellAction("sh -c 'cat >&2; exit 2'"))
+    rule = _rule(
+        ActionType.SHELL,
+        ShellAction(_py("import sys; sys.stderr.write(sys.stdin.read()); raise SystemExit(2)")),
+    )
 
     result = await executor.run(rule, {"z": 1, "a": 2}, blocking=True)
 
@@ -72,7 +86,7 @@ async def test_shell_receives_sorted_json_stdin() -> None:
 @pytest.mark.asyncio
 async def test_shell_timeout_returns_timeout_error() -> None:
     executor = Executor()
-    rule = _rule(ActionType.SHELL, ShellAction("sh -c 'sleep 2'"), timeout=0.1)
+    rule = _rule(ActionType.SHELL, ShellAction(_py("import time; time.sleep(2)")), timeout=0.1)
 
     result = await executor.run(rule, {"event": "PreToolUse"}, blocking=True)
 

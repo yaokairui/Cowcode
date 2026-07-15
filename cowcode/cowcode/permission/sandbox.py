@@ -36,6 +36,13 @@ def sandbox_ok(root: str, path: str) -> bool:
     root_resolved = root.rstrip(os.sep)
     if not path or not path.strip():
         return True  # 空路径视为 root
+    raw_norm = path.replace("\\", "/")
+    if raw_norm == "/tmp" or raw_norm.startswith("/tmp/"):
+        return True
+    if raw_norm == "/private/tmp" or raw_norm.startswith("/private/tmp/"):
+        return True
+    if os.name == "nt" and raw_norm.startswith("/"):
+        return False
     abs_path = os.path.join(root_resolved, path) if not os.path.isabs(path) else path
     try:
         resolved = eval_symlinks_or_ancestor(abs_path)

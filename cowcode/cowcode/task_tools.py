@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 
-from cowcode.task_manager import BackgroundTask, Manager, Status, TaskBusy, TaskNotFound
+from cowcode.task_manager import BackgroundTask, Manager, TaskBusy, TaskNotFound
 from cowcode.tool import Result
 
 

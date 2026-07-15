@@ -25,6 +25,7 @@ EXPECTED = {
     "session",
     "skill",
     "status",
+    "team",
 }
 
 
@@ -60,7 +61,7 @@ def test_register_builtins_all_registered() -> None:
     reg = Registry()
     register_builtins(reg)
     assert {cmd.name for cmd in reg.visible()} == EXPECTED
-    assert len(reg.visible()) == 13
+    assert len(reg.visible()) == 14
 
 
 def test_register_builtins_no_collision() -> None:

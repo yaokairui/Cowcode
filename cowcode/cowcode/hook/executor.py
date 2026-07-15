@@ -62,7 +62,7 @@ class Executor:
             proc.kill()
             await proc.wait()
             return ExecutionResult(err=TimeoutError(str(exc)))
-        reason = (stderr or stdout).decode(errors="replace").rstrip("\n")
+        reason = (stderr or stdout).decode(errors="replace").rstrip("\r\n")
         if blocking and proc.returncode == 2:
             return ExecutionResult(blocked=True, reason=reason)
         if proc.returncode == 0:

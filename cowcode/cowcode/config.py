@@ -16,6 +16,7 @@ from cowcode.protocol_defaults import (
 
 __all__ = [
     "Config",
+    "FeaturesConfig",
     "ProviderConfig",
     "load",
     "load_configs",
@@ -58,12 +59,21 @@ class ProviderConfig:
 
 
 @dataclass(frozen=True)
+class FeaturesConfig:
+    """Feature flags."""
+
+    coordinator_mode: bool = False
+    fork_teammate: bool = False
+
+
+@dataclass(frozen=True)
 class Config:
     """Top-level configuration containing provider list and optional system prompt."""
 
     providers: list[ProviderConfig] = field(default_factory=list)
     system_prompt: str = ""
     enable_subagent_background: bool | None = None
+    features: FeaturesConfig = field(default_factory=FeaturesConfig)
 
     def __post_init__(self) -> None:
         if not self.providers:
@@ -126,6 +136,7 @@ def load(path: str = "config.yaml") -> Config:
         providers=provider_configs,
         system_prompt=str(raw.get("system_prompt", "") or ""),
         enable_subagent_background=_optional_bool(raw.get("enableSubAgentBackground")),
+        features=_features_from_dict(raw.get("features", {})),
     )
 
 
@@ -145,6 +156,15 @@ def _optional_bool(value: object) -> bool | None:
     if value is None:
         return None
     return bool(value)
+
+
+def _features_from_dict(value: object) -> FeaturesConfig:
+    if not isinstance(value, dict):
+        return FeaturesConfig()
+    return FeaturesConfig(
+        coordinator_mode=bool(value.get("coordinator_mode", value.get("coordinatorMode", False))),
+        fork_teammate=bool(value.get("fork_teammate", value.get("forkTeammate", False))),
+    )
 
 
 def _provider_from_dict(raw: dict[str, Any], provider_number: int) -> ProviderConfig:

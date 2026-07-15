@@ -20,7 +20,7 @@ from textual.timer import Timer
 from textual.widgets import Footer, OptionList, RichLog, Static, TextArea
 from textual.widgets._option_list import Option
 
-from cowcode import __version__
+from cowcode import __version__, coordinator
 from cowcode.agent import (
     Agent,
     ApprovalRequest,
@@ -73,7 +73,9 @@ from cowcode.tool import Registry, new_default_registry, truncate_text
 from cowcode.subagent import load_catalog as load_subagent_catalog
 from cowcode.task_manager import Manager as TaskManager
 from cowcode.task_notice import consume_task_done
-from cowcode.task_tools import SendMessageTool, TaskGetTool, TaskListTool, TaskStopTool
+from cowcode.task_tools import TaskGetTool as BgTaskGetTool
+from cowcode.task_tools import TaskListTool as BgTaskListTool
+from cowcode.task_tools import TaskStopTool
 from cowcode.compact import (
     AutoCompactTrackingState,
     ContentReplacementState,
@@ -408,6 +410,8 @@ class CowcodeApp(App[Any]):
         task_manager: TaskManager | None = None,
         agent_tool: AgentTool | None = None,
         worktree_mgr: worktree.Manager | None = None,
+        team_manager=None,
+        coordinator_mode: bool = False,
     ) -> None:
         super().__init__()
         self._providers = providers
@@ -438,6 +442,8 @@ class CowcodeApp(App[Any]):
         self.task_manager = task_manager or TaskManager()
         self._agent_tool = agent_tool
         self.worktree_mgr = worktree_mgr
+        self.team_manager = team_manager
+        self.coordinator_mode = coordinator_mode
         self.active_cwd = ""
         if self.worktree_mgr is not None:
             session = self.worktree_mgr.current_session()
@@ -692,6 +698,9 @@ class CowcodeApp(App[Any]):
                 memory_manager=self._memory_manager,
                 hook_engine=self.hook_engine,
             )
+            if self.coordinator_mode:
+                self._agent.set_allowed_tools(coordinator.allowed_tools())
+                self._agent.append_system_prompt(coordinator.system_prompt_suffix())
             if self._agent_tool is not None:
                 # AgentTool 通过 getter 拿 parent；这里保留触发点，便于未来显式回填。
                 pass
@@ -728,6 +737,8 @@ class CowcodeApp(App[Any]):
         parts = [f"[{color}]{label}[/]"]
         parts.append("|")
         parts.append(self._selected_provider.model)
+        if self.coordinator_mode:
+            parts.append("[bold magenta][COORDINATOR][/]")
         if self._usage_in or self._usage_out:
             parts.append(
                 f"↑{_compact_tok(self._usage_in)} ↓{_compact_tok(self._usage_out)} tok"
@@ -1034,7 +1045,7 @@ class CowcodeApp(App[Any]):
         else:
             try:
                 if cmd.args_handler is not None:
-                    _, _, command_args = user_text.strip()[1:].partition(" ")
+                    _, _, command_args = text.strip()[1:].partition(" ")
                     await cmd.args_handler(self, command_args.strip())
                 else:
                     await cmd.handler(self)
@@ -1486,6 +1497,10 @@ class CowcodeApp(App[Any]):
 
 async def _amain() -> int:
     """异步装配 Cowcode 与 MCP 生命周期。"""
+    if "--team-member" in sys.argv[1:]:
+        from cowcode.team_member import parse_team_member_args, run_team_member
+
+        return await run_team_member(parse_team_member_args(sys.argv[1:]))
     if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
         print("Cowcode - terminal AI coding assistant\n\nUsage: cowcode [--help]")
         return 0
@@ -1526,11 +1541,15 @@ async def _amain() -> int:
 
         catalog = Catalog.load(Path(root))
         subagent_catalog = load_subagent_catalog(root)
+        from cowcode.team import Manager as TeamManager
+        from cowcode.team.registry import AgentNameRegistry
+
+        name_reg = AgentNameRegistry()
         task_manager = TaskManager()
-        registry.register(TaskListTool(task_manager))
-        registry.register(TaskGetTool(task_manager))
+        task_manager.set_name_registry(name_reg)
+        registry.register(BgTaskListTool(task_manager))
+        registry.register(BgTaskGetTool(task_manager))
         registry.register(TaskStopTool(task_manager))
-        registry.register(SendMessageTool(task_manager))
         hook_engine = hook.load(root)
         runtime = SessionRuntime(
             replacement=ContentReplacementState(),
@@ -1583,6 +1602,14 @@ async def _amain() -> int:
                 worktree_mgr.sweep_stale(datetime.now() - timedelta(hours=24))  # type: ignore[attr-defined]
             )
 
+        from cowcode.team.tools import register_team_tools
+
+        team_manager = TeamManager(Path.home(), root, worktree_mgr, task_manager, name_reg)
+        team_manager.catalog = subagent_catalog
+        team_manager.registry_tools = registry
+        register_team_tools(registry, team_manager)
+        task_manager.on_task_done(team_manager.handle_task_done)
+
         app_ref: dict[str, CowcodeApp] = {}
         agent_tool = AgentTool(
             subagent_catalog,
@@ -1592,6 +1619,7 @@ async def _amain() -> int:
             messages_getter=lambda: app_ref["app"].all_messages() if "app" in app_ref else [],
             bg_enabled=config.effective_enable_subagent_background(),
             worktree_mgr=worktree_mgr,
+            team_hook=team_manager,
         )
         registry.register(agent_tool)
         app = CowcodeApp(
@@ -1611,6 +1639,8 @@ async def _amain() -> int:
             task_manager=task_manager,
             agent_tool=agent_tool,
             worktree_mgr=worktree_mgr,
+            team_manager=team_manager,
+            coordinator_mode=coordinator.is_enabled(config),
         )
         app_ref["app"] = app
         await app.run_async()

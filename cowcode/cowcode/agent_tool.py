@@ -21,7 +21,9 @@ from cowcode.fork import build_forked_messages, is_fork_context
 from cowcode.runtime import SessionRuntime
 from cowcode.session import Session
 from cowcode.subagent import Catalog, Definition
-from cowcode.task_manager import Manager, PartialState
+from cowcode.agent_team import TeamHook, TeamSpawnRequest
+from cowcode.task_manager import Manager as TaskManager, PartialState
+from cowcode.team.types import InProcessTeammateNoSpawnError
 from cowcode.tool import Registry, Result
 from cowcode.tool.filter import FilterParams, apply_agent_tool_filter
 from cowcode.worktree import Manager as WorktreeManager
@@ -37,18 +39,21 @@ class AgentArgs:
     model: str = ""
     run_in_background: bool = False
     name: str = ""
+    team_name: str = ""
+    plan_mode_required: bool = False
 
 
 class AgentTool:
     def __init__(
         self,
         catalog: Catalog,
-        task_manager: Manager,
+        task_manager: TaskManager,
         registry: Registry,
         parent_getter: Callable[[], Agent | None],
         messages_getter: Callable[[], list],
         bg_enabled: bool = True,
         worktree_mgr: WorktreeManager | None = None,
+        team_hook: TeamHook | None = None,
     ) -> None:
         self._catalog = catalog
         self._task_manager = task_manager
@@ -57,6 +62,7 @@ class AgentTool:
         self._messages_getter = messages_getter
         self._bg_enabled = bg_enabled
         self.worktree_mgr = worktree_mgr
+        self._team_hook = team_hook
 
     @property
     def read_only(self) -> bool:
@@ -86,6 +92,8 @@ class AgentTool:
                 "model": {"type": "string", "enum": ["", "haiku", "sonnet", "opus", "inherit"]},
                 "run_in_background": {"type": "boolean"},
                 "name": {"type": "string"},
+                "team_name": {"type": "string"},
+                "plan_mode_required": {"type": "boolean"},
             },
             "required": ["prompt", "description"],
         }
@@ -103,6 +111,32 @@ class AgentTool:
         if parent is None:
             return Result("parent agent is not ready", is_error=True)
         parent_messages = self._messages_getter()
+        if parsed.team_name:
+            if self._team_hook is None:
+                return Result("team manager not configured", is_error=True)
+            team_name, member_name, in_process = self._team_hook.is_teammate_context(getattr(parent, "_ctx", {}))
+            _ = (team_name, member_name)
+            if in_process:
+                return Result("in-process teammate cannot spawn team members", is_error=True)
+            try:
+                text = await self._team_hook.spawn_teammate(
+                    TeamSpawnRequest(
+                        team_name=parsed.team_name,
+                        prompt=parsed.prompt,
+                        description=parsed.description,
+                        subagent_type=parsed.subagent_type,
+                        model=parsed.model,
+                        member_name=parsed.name,
+                        plan_mode_required=parsed.plan_mode_required,
+                        parent=parent,
+                        parent_messages=parent_messages,
+                    )
+                )
+            except InProcessTeammateNoSpawnError as exc:
+                return Result(str(exc), is_error=True)
+            except Exception as exc:
+                return Result(f"team spawn failed: {exc}", is_error=True)
+            return Result(text)
         if is_fork_context(parent_messages):
             return Result("Fork 子 Agent 不能再启动 Agent", is_error=True)
 
@@ -186,11 +220,13 @@ def _parse_args(args: str) -> AgentArgs | None:
         model=str(data.get("model", "") or ""),
         run_in_background=bool(data.get("run_in_background", False)),
         name=str(data.get("name", "") or ""),
+        team_name=str(data.get("team_name", "") or ""),
+        plan_mode_required=bool(data.get("plan_mode_required", False)),
     )
 
 
 def _build_subagent(
-    parent: Agent, definition: Definition, allowed: list[str], manager: Manager
+    parent: Agent, definition: Definition, allowed: list[str], manager: TaskManager
 ) -> Agent:
     return Agent(
         parent._provider,

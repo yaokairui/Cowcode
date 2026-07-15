@@ -20,7 +20,7 @@ from cowcode.hook.engine import Engine as HookEngine
 from cowcode.hook.event import Event as HookEvent
 from cowcode.hook.executor import ExecutionResult
 from cowcode.hook.rule import ActionType, PromptAction, Rule as HookRule, ShellAction
-from cowcode.permission import Mode
+from cowcode.permission import Decision, Mode, Outcome
 from cowcode.prompt import plan_reminder
 from cowcode.provider import Request
 from cowcode.session import Session, StreamEvent, ToolCall, Usage
@@ -868,3 +868,46 @@ async def test_stop_hook_runs_before_done_event() -> None:
 
     assert events[-1].done
     assert fake_executor.calls == ["stop"]
+
+
+@pytest.mark.asyncio
+async def test_approval_resume_executes_once_without_restarting_agent() -> None:
+    """Ask 审批通过后应继续同一个工具调用，不能重启整轮 Agent。"""
+    registry = Registry()
+    tool = FakeTool("bash", read_only=False)
+    registry.register(tool)
+    provider = FakeProvider(
+        scripts=[
+            [_tool_call("bash", json.dumps({"command": "echo hi"}), call_id="c1"), _done()],
+            [_text("done"), _done()],
+        ]
+    )
+
+    class AskEngine:
+        start_mode = Mode.DEFAULT
+
+        def check(self, mode, call, read_only):
+            return Decision.ASK, "needs approval"
+
+    session = Session()
+    session.append("user", "run bash")
+    stream = Agent(provider, registry, engine=AskEngine()).run(
+        session, Mode.DEFAULT, asyncio.Event()
+    )
+
+    assert (await anext(stream)).iter == 1
+    start = await anext(stream)
+    assert start.tool is not None
+    assert start.tool.name == "bash"
+    assert start.tool.phase == Phase.START
+    approval = await anext(stream)
+    assert approval.approval is not None
+    approval.approval.respond.set_result(Outcome.ALLOW_ONCE)
+
+    remaining = [event async for event in stream]
+
+    tool_events = [event.tool for event in remaining if event.tool is not None]
+    assert [(event.name, event.phase) for event in tool_events] == [("bash", Phase.END)]
+    assert tool.calls == [json.dumps({"command": "echo hi"})]
+    assert provider.call_idx == 2
+    assert remaining[-1].done

@@ -11,7 +11,8 @@ from cowcode.tool.filter import (
 
 
 def test_constants() -> None:
-    assert ALL_AGENT_DISALLOWED_TOOLS == ["Agent"]
+    assert "Agent" in ALL_AGENT_DISALLOWED_TOOLS
+    assert "TaskCreate" in ALL_AGENT_DISALLOWED_TOOLS
     assert CUSTOM_AGENT_DISALLOWED_TOOLS == []
     assert "bash" in ASYNC_AGENT_ALLOWED_TOOLS
 
@@ -44,6 +45,17 @@ def test_allowed_and_disallowed_filters() -> None:
     )
 
     assert result == ["read_file"]
+
+
+def test_teammate_tools_visible_only_for_teammates() -> None:
+    all_tools = ["read_file", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "SendMessage", "Agent"]
+    normal = apply_agent_tool_filter(FilterParams(all=all_tools, source=0, background=False))
+    teammate = apply_agent_tool_filter(FilterParams(all=all_tools, source=0, background=False, teammate=True))
+
+    assert "TaskCreate" not in normal
+    assert "SendMessage" not in normal
+    assert {"TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "SendMessage"}.issubset(teammate)
+    assert "Agent" not in teammate
 
 
 def test_is_mcp_or_skill() -> None:

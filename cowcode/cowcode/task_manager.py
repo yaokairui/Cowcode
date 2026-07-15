@@ -8,6 +8,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from enum import IntEnum
+from typing import Awaitable, Callable
 
 import cowcode.run_to_completion  # noqa: F401  # 注册 Agent.run_to_completion
 from cowcode.agent import Agent, Event, Phase
@@ -69,14 +70,25 @@ class Manager:
         self._tasks: dict[str, BackgroundTask] = {}
         self._by_name: dict[str, str] = {}
         self._done: asyncio.Queue[str] = asyncio.Queue(maxsize=32)
+        self._name_reg = None
+        self._done_callbacks: list[Callable[[str], Awaitable[None]]] = []
 
-    async def launch(self, agent: Agent, session: Session, name: str, task_text: str) -> str:
-        task_id = self._next_id()
+    async def launch(
+        self,
+        agent: Agent,
+        session: Session,
+        name: str,
+        task_text: str,
+        task_id: str = "",
+    ) -> str:
+        task_id = task_id or self._next_id()
         bt = BackgroundTask(id=task_id, name=name, sub_agent=agent, session=session, task=task_text)
         async with self._lock:
             self._tasks[task_id] = bt
             if name:
                 self._by_name[name] = task_id
+                if self._name_reg is not None:
+                    self._name_reg.register(name, task_id)
         self._start_runner(bt, task_text)
         return task_id
 
@@ -105,6 +117,8 @@ class Manager:
             self._tasks[task_id] = bt
             if name:
                 self._by_name[name] = task_id
+                if self._name_reg is not None:
+                    self._name_reg.register(name, task_id)
         asyncio.create_task(self._watch_existing(bt, events, handle))
         return task_id
 
@@ -125,13 +139,14 @@ class Manager:
         return True
 
     async def send_message(self, name: str, message: str) -> str:
-        task_id = self._by_name.get(name)
+        task_id = self._name_reg.resolve(name) if self._name_reg is not None else None
+        task_id = task_id or self._by_name.get(name)
         if not task_id:
             raise TaskNotFound(name)
         task = self.get(task_id)
         if task is None:
             raise TaskNotFound(name)
-        if task.status != Status.COMPLETED:
+        if task.status == Status.RUNNING:
             raise TaskBusy(name)
         task.session.append("user", message)
         task.status = Status.RUNNING
@@ -140,6 +155,12 @@ class Manager:
         task.end_time = 0.0
         self._start_runner(task, "")
         return task.id
+
+    def set_name_registry(self, reg) -> None:
+        self._name_reg = reg
+
+    def on_task_done(self, fn: Callable[[str], Awaitable[None]]) -> None:
+        self._done_callbacks.append(fn)
 
     async def upgrade_approval(self, _req) -> tuple[object, bool]:
         return (None, False)
@@ -168,6 +189,7 @@ class Manager:
                     pass
                 await aggregator
                 self._notify_done(bt.id)
+                await self._run_done_callbacks(bt.id)
 
         bt.handle = asyncio.create_task(runner())
 
@@ -188,6 +210,7 @@ class Manager:
             bt.end_time = time.monotonic()
             aggregator.cancel()
             self._notify_done(bt.id)
+            await self._run_done_callbacks(bt.id)
 
     async def _aggregate_events(self, events: asyncio.Queue, bt: BackgroundTask) -> None:
         while True:
@@ -203,6 +226,13 @@ class Manager:
                 bt.usage.cache_write += event.usage.cache_write
                 bt.usage.cache_read += event.usage.cache_read
 
+    async def _run_done_callbacks(self, task_id: str) -> None:
+        for callback in list(self._done_callbacks):
+            try:
+                await callback(task_id)
+            except Exception as exc:
+                print(f"task manager: done callback failed for {task_id}: {exc}", file=sys.stderr)
+
     def _notify_done(self, task_id: str) -> None:
         try:
             self._done.put_nowait(task_id)
@@ -211,4 +241,4 @@ class Manager:
 
     @staticmethod
     def _next_id() -> str:
-        return "task_" + secrets.token_hex(4)
+        return "task_" + secrets.token_hex(3)
