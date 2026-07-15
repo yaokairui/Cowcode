@@ -23,7 +23,9 @@ class TeammateContext:
     member_name: str
     agent_id: str
     backend_type: str = "in-process"
-    read_unread: Callable[[], Awaitable[tuple[list[int], list[IncomingMessage]]]] | None = None
+    read_unread: (
+        Callable[[], Awaitable[tuple[list[int], list[IncomingMessage]]]] | None
+    ) = None
     mark_read: Callable[[list[int]], Awaitable[None]] | None = None
 
 
@@ -50,7 +52,9 @@ class TeamHook(Protocol):
 WITH_TEAMMATE_KEY = "teammate"
 
 
-def with_teammate_context(ctx: dict[str, Any] | None, tc: TeammateContext) -> dict[str, Any]:
+def with_teammate_context(
+    ctx: dict[str, Any] | None, tc: TeammateContext
+) -> dict[str, Any]:
     out = dict(ctx or {})
     out[WITH_TEAMMATE_KEY] = tc
     return out

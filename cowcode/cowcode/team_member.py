@@ -61,7 +61,9 @@ async def run_team_member(args: TeamMemberArgs) -> int:
         if messages:
             await box.mark_read(args.agent_id, indices)
             for msg in messages:
-                print(f"Text from {msg.from_}: {msg.summary}\n{msg.content}", flush=True)
+                print(
+                    f"Text from {msg.from_}: {msg.summary}\n{msg.content}", flush=True
+                )
                 if msg.type == MessageType.SHUTDOWN_REQUEST:
                     await box.write(
                         "lead",

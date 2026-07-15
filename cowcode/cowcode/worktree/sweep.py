@@ -20,7 +20,9 @@ def random_agent_name() -> str:
 
 async def sweep_stale(self: Manager, cutoff: datetime) -> list[str]:
     removed: list[str] = []
-    current = self._current_session.worktree_path if self._current_session is not None else ""
+    current = (
+        self._current_session.worktree_path if self._current_session is not None else ""
+    )
     for path in Path(self.worktree_dir).iterdir():
         if not path.is_dir() or EPHEMERAL_PATTERN.fullmatch(path.name) is None:
             continue
@@ -32,7 +34,9 @@ async def sweep_stale(self: Manager, cutoff: datetime) -> list[str]:
             status = await _run_git(path, "status", "--porcelain")
             if status.strip():
                 continue
-            unpushed = await _run_git(path, "rev-list", "--max-count=1", "HEAD", "--not", "--remotes")
+            unpushed = await _run_git(
+                path, "rev-list", "--max-count=1", "HEAD", "--not", "--remotes"
+            )
             if unpushed.strip():
                 continue
         except Exception:

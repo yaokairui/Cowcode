@@ -27,7 +27,9 @@ def build_forked_messages(parent_msgs: list[Message], task: str) -> list[Message
         for msg in messages:
             if msg.role == "tool":
                 consumed.update(result.tool_call_id for result in msg.tool_results)
-        missing = [call.id for call in messages[-1].tool_calls if call.id not in consumed]
+        missing = [
+            call.id for call in messages[-1].tool_calls if call.id not in consumed
+        ]
         if missing:
             messages.append(
                 Message(

@@ -6,7 +6,6 @@ import pytest
 
 from cowcode.agent import Agent
 from cowcode.agent_tool import AgentTool
-from cowcode.session import Session
 from cowcode.subagent import Catalog
 from cowcode.task_manager import Manager as TaskManager
 from cowcode.tool import Registry
@@ -45,7 +44,11 @@ async def test_agent_tool_team_name_delegates_to_hook() -> None:
         team_hook=hook,
     )
 
-    result = await tool.execute(json.dumps({"prompt": "do", "description": "d", "team_name": "demo", "name": "alice"}))
+    result = await tool.execute(
+        json.dumps(
+            {"prompt": "do", "description": "d", "team_name": "demo", "name": "alice"}
+        )
+    )
     assert not result.is_error
     assert hook.called is not None
     assert hook.called.team_name == "demo"

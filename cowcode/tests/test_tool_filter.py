@@ -18,7 +18,9 @@ def test_constants() -> None:
 
 
 def test_filter_removes_agent_by_default() -> None:
-    assert apply_agent_tool_filter(FilterParams(all=["read_file", "Agent"], source=0, background=False)) == ["read_file"]
+    assert apply_agent_tool_filter(
+        FilterParams(all=["read_file", "Agent"], source=0, background=False)
+    ) == ["read_file"]
 
 
 def test_background_keeps_basic_and_mcp_tools() -> None:
@@ -48,13 +50,27 @@ def test_allowed_and_disallowed_filters() -> None:
 
 
 def test_teammate_tools_visible_only_for_teammates() -> None:
-    all_tools = ["read_file", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "SendMessage", "Agent"]
-    normal = apply_agent_tool_filter(FilterParams(all=all_tools, source=0, background=False))
-    teammate = apply_agent_tool_filter(FilterParams(all=all_tools, source=0, background=False, teammate=True))
+    all_tools = [
+        "read_file",
+        "TaskCreate",
+        "TaskGet",
+        "TaskList",
+        "TaskUpdate",
+        "SendMessage",
+        "Agent",
+    ]
+    normal = apply_agent_tool_filter(
+        FilterParams(all=all_tools, source=0, background=False)
+    )
+    teammate = apply_agent_tool_filter(
+        FilterParams(all=all_tools, source=0, background=False, teammate=True)
+    )
 
     assert "TaskCreate" not in normal
     assert "SendMessage" not in normal
-    assert {"TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "SendMessage"}.issubset(teammate)
+    assert {"TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "SendMessage"}.issubset(
+        teammate
+    )
     assert "Agent" not in teammate
 
 

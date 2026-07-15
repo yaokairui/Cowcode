@@ -23,10 +23,14 @@ from cowcode.permission.matcher import compile_matcher
         pytest.param("!git *", "npm install", True, True, id="not-glob-hit"),
         pytest.param("!git *", "git status", False, True, id="not-glob-miss"),
         pytest.param("**/*.py", "src/cowcode/app.py", True, False, id="path-glob-hit"),
-        pytest.param("**/*.py", "src/cowcode/app.txt", False, False, id="path-glob-miss"),
+        pytest.param(
+            "**/*.py", "src/cowcode/app.txt", False, False, id="path-glob-miss"
+        ),
     ],
 )
-def test_compile_matcher_types(pattern: str, target: str, expected: bool, is_command: bool) -> None:
+def test_compile_matcher_types(
+    pattern: str, target: str, expected: bool, is_command: bool
+) -> None:
     matcher = compile_matcher(pattern, is_command=is_command)
 
     assert matcher.match(target) is expected

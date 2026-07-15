@@ -80,7 +80,11 @@ class Config:
             raise ConfigError("At least one provider must be configured")
 
     def effective_enable_subagent_background(self) -> bool:
-        return True if self.enable_subagent_background is None else self.enable_subagent_background
+        return (
+            True
+            if self.enable_subagent_background is None
+            else self.enable_subagent_background
+        )
 
 
 def effective_context_window(provider: ProviderConfig) -> int:
@@ -162,8 +166,12 @@ def _features_from_dict(value: object) -> FeaturesConfig:
     if not isinstance(value, dict):
         return FeaturesConfig()
     return FeaturesConfig(
-        coordinator_mode=bool(value.get("coordinator_mode", value.get("coordinatorMode", False))),
-        fork_teammate=bool(value.get("fork_teammate", value.get("forkTeammate", False))),
+        coordinator_mode=bool(
+            value.get("coordinator_mode", value.get("coordinatorMode", False))
+        ),
+        fork_teammate=bool(
+            value.get("fork_teammate", value.get("forkTeammate", False))
+        ),
     )
 
 

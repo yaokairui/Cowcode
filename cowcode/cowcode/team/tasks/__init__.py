@@ -175,7 +175,9 @@ class Store:
     @staticmethod
     def _with_ready(task: Task, tasks: list[Task]) -> Task:
         statuses = {item.id: item.status for item in tasks}
-        task.is_ready = all(statuses.get(dep) == Status.COMPLETED for dep in task.blocked_by)
+        task.is_ready = all(
+            statuses.get(dep) == Status.COMPLETED for dep in task.blocked_by
+        )
         return task
 
     @staticmethod

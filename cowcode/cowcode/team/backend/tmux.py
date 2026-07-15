@@ -60,7 +60,9 @@ class TmuxBackend:
     async def wake(self, pane_id: str, agent_id: str) -> None:
         if not pane_id:
             return
-        proc = await asyncio.create_subprocess_exec("tmux", "send-keys", "-t", pane_id, "", "Enter")
+        proc = await asyncio.create_subprocess_exec(
+            "tmux", "send-keys", "-t", pane_id, "", "Enter"
+        )
         await proc.wait()
 
     async def kill(self, pane_id: str, agent_id: str) -> None:

@@ -11,7 +11,12 @@ from pathlib import Path
 from cowcode.team.backend import new_backend
 from cowcode.team.backend.detect import detect
 from cowcode.team.mailbox import Box, Message, MessageType
-from cowcode.team.persistence import attach_paths, atomic_write_json, read_json, sanitize
+from cowcode.team.persistence import (
+    attach_paths,
+    atomic_write_json,
+    read_json,
+    sanitize,
+)
 from cowcode.team.registry import AgentNameRegistry
 from cowcode.team.types import (
     BackendType,
@@ -34,7 +39,14 @@ class LeadMessage:
 
 
 class Manager:
-    def __init__(self, home_dir: str | Path, project_root: str | Path, wt_mgr, task_mgr, registry: AgentNameRegistry | None = None) -> None:
+    def __init__(
+        self,
+        home_dir: str | Path,
+        project_root: str | Path,
+        wt_mgr,
+        task_mgr,
+        registry: AgentNameRegistry | None = None,
+    ) -> None:
         self.home_dir = Path(home_dir)
         self.project_root = Path(project_root)
         self.wt_mgr = wt_mgr
@@ -65,7 +77,11 @@ class Manager:
         tc = teammate_context_from_ctx(ctx)
         if tc is None:
             return "", "", False
-        return tc.team_name, tc.member_name, tc.backend_type == str(BackendType.IN_PROCESS)
+        return (
+            tc.team_name,
+            tc.member_name,
+            tc.backend_type == str(BackendType.IN_PROCESS),
+        )
 
     async def create(self, name: str, description: str = "") -> Team:
         slug = sanitize(name)
@@ -84,7 +100,9 @@ class Manager:
                     lead_agent_id="lead",
                     backend=detect(),
                     description=description,
-                    members=[TeammateInfo(name="lead", agent_id="lead", is_active=None)],
+                    members=[
+                        TeammateInfo(name="lead", agent_id="lead", is_active=None)
+                    ],
                 ),
                 self.base_dir,
             )
@@ -99,7 +117,9 @@ class Manager:
             team = self.get(name)
             if team is None:
                 raise TeamNotFoundError(name)
-            if not force and any(member.is_active is not False for member in team.members):
+            if not force and any(
+                member.is_active is not False for member in team.members
+            ):
                 raise TeamHasActiveMembersError(name)
             members = list(team.members)
             self.teams.pop(team.sanitized_name, None)
@@ -172,7 +192,11 @@ class Manager:
         if member.session_dir:
             shutil.rmtree(member.session_dir, ignore_errors=True)
         if self.wt_mgr is not None and member.worktree_path:
-            name = f"team-{member.branch}" if not member.branch else member.branch.removeprefix("worktree-").replace("+", "/")
+            name = (
+                f"team-{member.branch}"
+                if not member.branch
+                else member.branch.removeprefix("worktree-").replace("+", "/")
+            )
             try:
                 await self.wt_mgr.remove(name, ExitOptions(discard_changes=True))
             except Exception:

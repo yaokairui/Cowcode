@@ -27,7 +27,6 @@ async def test_reset_for_new_session_resets_compact_state() -> None:
     )
     old_replacement = runtime.replacement
     old_recovery = runtime.recovery
-    old_tracking = runtime.auto_tracking
     new_session = SessionContext("new", "/new", "/new/tool-results")
 
     await runtime.reset_for_new_session(new_session)

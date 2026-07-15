@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -12,7 +11,14 @@ import pytest
 
 from cowcode.hook.executor import Executor
 from cowcode.hook.event import Event
-from cowcode.hook.rule import ActionType, HttpAction, PromptAction, Rule, ShellAction, SubagentAction
+from cowcode.hook.rule import (
+    ActionType,
+    HttpAction,
+    PromptAction,
+    Rule,
+    ShellAction,
+    SubagentAction,
+)
 
 
 def _py(code: str) -> str:
@@ -35,7 +41,9 @@ async def test_shell_exit_2_blocks_with_stderr_reason() -> None:
     executor = Executor()
     rule = _rule(
         ActionType.SHELL,
-        ShellAction(_py("import sys; print('blocked', file=sys.stderr); raise SystemExit(2)")),
+        ShellAction(
+            _py("import sys; print('blocked', file=sys.stderr); raise SystemExit(2)")
+        ),
     )
 
     result = await executor.run(rule, {"event": "PreToolUse"}, blocking=True)
@@ -60,7 +68,9 @@ async def test_shell_exit_1_is_error_not_block() -> None:
     executor = Executor()
     rule = _rule(
         ActionType.SHELL,
-        ShellAction(_py("import sys; print('bad', file=sys.stderr); raise SystemExit(1)")),
+        ShellAction(
+            _py("import sys; print('bad', file=sys.stderr); raise SystemExit(1)")
+        ),
     )
 
     result = await executor.run(rule, {"event": "PreToolUse"}, blocking=True)
@@ -75,7 +85,9 @@ async def test_shell_receives_sorted_json_stdin() -> None:
     executor = Executor()
     rule = _rule(
         ActionType.SHELL,
-        ShellAction(_py("import sys; sys.stderr.write(sys.stdin.read()); raise SystemExit(2)")),
+        ShellAction(
+            _py("import sys; sys.stderr.write(sys.stdin.read()); raise SystemExit(2)")
+        ),
     )
 
     result = await executor.run(rule, {"z": 1, "a": 2}, blocking=True)
@@ -86,7 +98,9 @@ async def test_shell_receives_sorted_json_stdin() -> None:
 @pytest.mark.asyncio
 async def test_shell_timeout_returns_timeout_error() -> None:
     executor = Executor()
-    rule = _rule(ActionType.SHELL, ShellAction(_py("import time; time.sleep(2)")), timeout=0.1)
+    rule = _rule(
+        ActionType.SHELL, ShellAction(_py("import time; time.sleep(2)")), timeout=0.1
+    )
 
     result = await executor.run(rule, {"event": "PreToolUse"}, blocking=True)
 
@@ -181,4 +195,6 @@ def test_subagent_stub_logs_fixed_message(capsys) -> None:
     result = executor._run_subagent(SubagentAction("foo", "test"))
 
     assert result.err is None
-    assert "[hook subagent] not yet implemented, skipped: foo" in capsys.readouterr().err
+    assert (
+        "[hook subagent] not yet implemented, skipped: foo" in capsys.readouterr().err
+    )

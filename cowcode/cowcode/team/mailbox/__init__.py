@@ -68,5 +68,7 @@ class Box:
     def _messages(cls, path: Path) -> list[Message]:
         data = cls._read_data(path)
         return [
-            Message.from_dict(item) for item in data["messages"] if isinstance(item, dict)
+            Message.from_dict(item)
+            for item in data["messages"]
+            if isinstance(item, dict)
         ]

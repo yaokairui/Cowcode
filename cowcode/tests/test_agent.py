@@ -784,7 +784,10 @@ async def test_pre_tool_use_hook_block_returns_tool_result_and_events() -> None:
     registry.register(tool)
     provider = FakeProvider(
         scripts=[
-            [_tool_call("bash", json.dumps({"command": "echo hi"}), call_id="c1"), _done()],
+            [
+                _tool_call("bash", json.dumps({"command": "echo hi"}), call_id="c1"),
+                _done(),
+            ],
             [_text("done"), _done()],
         ]
     )
@@ -878,7 +881,10 @@ async def test_approval_resume_executes_once_without_restarting_agent() -> None:
     registry.register(tool)
     provider = FakeProvider(
         scripts=[
-            [_tool_call("bash", json.dumps({"command": "echo hi"}), call_id="c1"), _done()],
+            [
+                _tool_call("bash", json.dumps({"command": "echo hi"}), call_id="c1"),
+                _done(),
+            ],
             [_text("done"), _done()],
         ]
     )

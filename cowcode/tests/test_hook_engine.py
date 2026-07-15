@@ -10,7 +10,7 @@ import pytest
 from cowcode.hook.engine import Engine
 from cowcode.hook.event import Event
 from cowcode.hook.executor import ExecutionResult
-from cowcode.hook.rule import ActionType, PromptAction, Rule, ShellAction
+from cowcode.hook.rule import ActionType, PromptAction, Rule
 
 
 @dataclass

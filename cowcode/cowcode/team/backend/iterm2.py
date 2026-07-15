@@ -15,7 +15,9 @@ class Iterm2Backend:
         return BackendType.ITERM2
 
     def build_member_cmd(self, req: SpawnRequest) -> str:
-        return " ".join(shlex.quote(part) for part in TmuxBackend().build_member_cmd(req))
+        return " ".join(
+            shlex.quote(part) for part in TmuxBackend().build_member_cmd(req)
+        )
 
     async def spawn(self, req: SpawnRequest) -> tuple[str, str]:
         proc = await asyncio.create_subprocess_exec(
@@ -35,11 +37,15 @@ class Iterm2Backend:
     async def wake(self, pane_id: str, agent_id: str) -> None:
         if not pane_id:
             return
-        proc = await asyncio.create_subprocess_exec("it2", "send-text", "--pane", pane_id, "")
+        proc = await asyncio.create_subprocess_exec(
+            "it2", "send-text", "--pane", pane_id, ""
+        )
         await proc.wait()
 
     async def kill(self, pane_id: str, agent_id: str) -> None:
         if not pane_id:
             return
-        proc = await asyncio.create_subprocess_exec("it2", "close-pane", "--pane", pane_id)
+        proc = await asyncio.create_subprocess_exec(
+            "it2", "close-pane", "--pane", pane_id
+        )
         await proc.wait()

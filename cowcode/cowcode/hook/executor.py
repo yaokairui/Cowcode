@@ -34,14 +34,22 @@ class Executor:
     def __init__(self) -> None:
         self._http_client = httpx.AsyncClient()
 
-    async def run(self, rule: Rule, payload: Payload, *, blocking: bool) -> ExecutionResult:
-        if rule.action_type == ActionType.SHELL and isinstance(rule.action, ShellAction):
+    async def run(
+        self, rule: Rule, payload: Payload, *, blocking: bool
+    ) -> ExecutionResult:
+        if rule.action_type == ActionType.SHELL and isinstance(
+            rule.action, ShellAction
+        ):
             return await self._run_shell(rule.action, payload, blocking, rule.timeout)
-        if rule.action_type == ActionType.PROMPT and isinstance(rule.action, PromptAction):
+        if rule.action_type == ActionType.PROMPT and isinstance(
+            rule.action, PromptAction
+        ):
             return self._run_prompt(rule.action)
         if rule.action_type == ActionType.HTTP and isinstance(rule.action, HttpAction):
             return await self._run_http(rule.action, payload, blocking, rule.timeout)
-        if rule.action_type == ActionType.SUBAGENT and isinstance(rule.action, SubagentAction):
+        if rule.action_type == ActionType.SUBAGENT and isinstance(
+            rule.action, SubagentAction
+        ):
             return self._run_subagent(rule.action)
         return ExecutionResult(err=RuntimeError("invalid hook action"))
 

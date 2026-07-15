@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from cowcode.worktree.slug import flat_slug, validate_slug
-from cowcode.worktree.session import WorktreeSession, clear_session, load_session, save_session
+from cowcode.worktree.session import (
+    WorktreeSession,
+    clear_session,
+    load_session,
+    save_session,
+)
 from cowcode.worktree.manager import Manager, Worktree
 
 # Import modules for Manager method registration.

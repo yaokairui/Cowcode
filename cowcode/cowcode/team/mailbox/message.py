@@ -45,7 +45,9 @@ class Message:
             type=MessageType(str(data.get("type") or MessageType.TEXT)),
             summary=str(data.get("summary", "") or ""),
             content=str(data.get("content", "") or ""),
-            payload=data.get("payload") if isinstance(data.get("payload"), dict) else None,
+            payload=data.get("payload")
+            if isinstance(data.get("payload"), dict)
+            else None,
             timestamp=int(data.get("timestamp", 0) or 0),
             read=bool(data.get("read", False)),
         )

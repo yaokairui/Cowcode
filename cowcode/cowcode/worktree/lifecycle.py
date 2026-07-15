@@ -49,7 +49,9 @@ async def enter(self: Manager, name: str) -> WorktreeSession:
         if wt is None:
             raise ValueError(f"未知 worktree: {name}")
         try:
-            original_branch = await _run_git(self.repo_root, "rev-parse", "--abbrev-ref", "HEAD")
+            original_branch = await _run_git(
+                self.repo_root, "rev-parse", "--abbrev-ref", "HEAD"
+            )
             original_head = await _run_git(self.repo_root, "rev-parse", "HEAD")
         except Exception:
             original_branch = ""
@@ -67,7 +69,9 @@ async def enter(self: Manager, name: str) -> WorktreeSession:
         return session
 
 
-async def exit(self: Manager, name: str, action: ExitAction, opts: ExitOptions) -> ExitReport:
+async def exit(
+    self: Manager, name: str, action: ExitAction, opts: ExitOptions
+) -> ExitReport:
     async with self.lock:
         session = self._current_session
         if session is None or session.worktree_name != name:
@@ -77,14 +81,18 @@ async def exit(self: Manager, name: str, action: ExitAction, opts: ExitOptions) 
             raise ValueError(f"未知 worktree: {name}")
         if action == ExitAction.REMOVE and not opts.discard_changes:
             if await _has_worktree_changes(wt.path, wt.head_commit):
-                raise WorktreeHasChangesError("worktree has uncommitted changes or new commits")
+                raise WorktreeHasChangesError(
+                    "worktree has uncommitted changes or new commits"
+                )
         with suppress(OSError):
             os.chdir(session.original_cwd)
         self._current_session = None
         save_session(self.session_file, None)
         if action == ExitAction.REMOVE:
             await _remove_locked(self, name, wt.path, wt.branch)
-        return ExitReport(removed=action == ExitAction.REMOVE, path=wt.path, branch=wt.branch)
+        return ExitReport(
+            removed=action == ExitAction.REMOVE, path=wt.path, branch=wt.branch
+        )
 
 
 async def remove(self: Manager, name: str, opts: ExitOptions) -> ExitReport:
@@ -92,9 +100,16 @@ async def remove(self: Manager, name: str, opts: ExitOptions) -> ExitReport:
         wt = self.active.get(name)
         if wt is None:
             raise ValueError(f"未知 worktree: {name}")
-        if not opts.discard_changes and await _has_worktree_changes(wt.path, wt.head_commit):
-            raise WorktreeHasChangesError("worktree has uncommitted changes or new commits")
-        if self._current_session is not None and self._current_session.worktree_name == name:
+        if not opts.discard_changes and await _has_worktree_changes(
+            wt.path, wt.head_commit
+        ):
+            raise WorktreeHasChangesError(
+                "worktree has uncommitted changes or new commits"
+            )
+        if (
+            self._current_session is not None
+            and self._current_session.worktree_name == name
+        ):
             with suppress(OSError):
                 os.chdir(self._current_session.original_cwd)
             self._current_session = None

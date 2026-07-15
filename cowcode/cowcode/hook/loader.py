@@ -44,14 +44,16 @@ def load(project_root: str | Path) -> Engine:
         hooks = raw.get("hooks") if isinstance(raw, dict) else None
         if not isinstance(hooks, list):
             print(
-            f"hooks file {path}: root must contain hooks list, skipped",
-            file=sys.stderr,
-        )
+                f"hooks file {path}: root must contain hooks list, skipped",
+                file=sys.stderr,
+            )
             continue
         sources.append(str(path))
         for idx, item in enumerate(hooks):
             if not isinstance(item, dict):
-                print(f"hook #{idx} in {path}: must be object, skipped", file=sys.stderr)
+                print(
+                    f"hook #{idx} in {path}: must be object, skipped", file=sys.stderr
+                )
                 continue
             rule = _compile_rule(str(path), idx, item)
             if rule is None:
@@ -97,7 +99,9 @@ def _compile_rule(source: str, idx: int, raw: dict[str, Any]) -> Rule | None:
     timeout_raw = raw.get("timeout", "30s")
     timeout = _parse_duration(str(timeout_raw))
     if timeout is None:
-        print(f'hook "{name}": invalid timeout "{timeout_raw}", skipped', file=sys.stderr)
+        print(
+            f'hook "{name}": invalid timeout "{timeout_raw}", skipped', file=sys.stderr
+        )
         return None
     condition = _compile_condition(name, raw.get("if"))
     if condition is _INVALID:
@@ -221,7 +225,10 @@ def _compile_action(name: str, raw: object):
     agent_name = raw.get("agent_name")
     prompt = raw.get("prompt")
     if not isinstance(agent_name, str) or not isinstance(prompt, str):
-        print(f'hook "{name}": subagent.agent_name and subagent.prompt required, skipped', file=sys.stderr)
+        print(
+            f'hook "{name}": subagent.agent_name and subagent.prompt required, skipped',
+            file=sys.stderr,
+        )
         return None, None
     return action_type, SubagentAction(agent_name, prompt)
 

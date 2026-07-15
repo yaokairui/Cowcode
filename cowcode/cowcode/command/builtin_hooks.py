@@ -25,7 +25,9 @@ async def handle_hooks(ui: UI) -> None:
             if rule.asyncio_mode:
                 flags.append("[async]")
             suffix = " " + " ".join(flags) if flags else ""
-            lines.append(f"  {rule.name}  {rule.event.value}  {rule.action_type.value}{suffix}")
+            lines.append(
+                f"  {rule.name}  {rule.event.value}  {rule.action_type.value}{suffix}"
+            )
     sources = ui.hook_sources()
     if sources:
         lines.append("Loaded from: " + ", ".join(sources))

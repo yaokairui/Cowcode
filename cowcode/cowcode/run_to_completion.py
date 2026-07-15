@@ -50,7 +50,11 @@ async def run_to_completion(
             break
     if not final_text.strip():
         final_text = next(
-            (msg.content for msg in reversed(session.get_history()) if msg.role == "assistant"),
+            (
+                msg.content
+                for msg in reversed(session.get_history())
+                if msg.role == "assistant"
+            ),
             "",
         )
     if turn_count >= max_turns and final_text.endswith(NOTICE_MAX_ITER):

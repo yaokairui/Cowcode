@@ -29,12 +29,22 @@ async def test_agent_injects_incoming_messages() -> None:
     marked = []
 
     async def read_unread():
-        return [0], [IncomingMessage(from_="lead", type="text", summary="hello there", content="body", timestamp=1)]
+        return [0], [
+            IncomingMessage(
+                from_="lead",
+                type="text",
+                summary="hello there",
+                content="body",
+                timestamp=1,
+            )
+        ]
 
     async def mark_read(indices):
         marked.extend(indices)
 
-    tc = TeammateContext("demo", "alice", "agent-1", read_unread=read_unread, mark_read=mark_read)
+    tc = TeammateContext(
+        "demo", "alice", "agent-1", read_unread=read_unread, mark_read=mark_read
+    )
     session = Session()
     session.append("user", "hi")
     agent = Agent(provider, Registry(), ctx={"teammate": tc})
@@ -51,12 +61,22 @@ async def test_plan_approval_switches_permission_mode() -> None:
     provider = CapturingProvider()
 
     async def read_unread():
-        return [0], [IncomingMessage(from_="lead", type="plan_approval_response", summary="ok", content="", payload={"approve": True})]
+        return [0], [
+            IncomingMessage(
+                from_="lead",
+                type="plan_approval_response",
+                summary="ok",
+                content="",
+                payload={"approve": True},
+            )
+        ]
 
     async def mark_read(indices):
         return None
 
-    tc = TeammateContext("demo", "alice", "agent-1", read_unread=read_unread, mark_read=mark_read)
+    tc = TeammateContext(
+        "demo", "alice", "agent-1", read_unread=read_unread, mark_read=mark_read
+    )
     session = Session()
     session.append("user", "hi")
     agent = Agent(provider, Registry(), permission_mode=Mode.PLAN, ctx={"teammate": tc})

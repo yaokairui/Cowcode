@@ -22,7 +22,9 @@ async def handle_team(ui, args: str) -> None:
             return
         for team in teams:
             active = sum(1 for member in team.members if member.is_active is not False)
-            ui.println(f"{team.sanitized_name}  {team.backend}  {len(team.members)} 成员  [{active}/{len(team.members)}] 活跃")
+            ui.println(
+                f"{team.sanitized_name}  {team.backend}  {len(team.members)} 成员  [{active}/{len(team.members)}] 活跃"
+            )
         return
     if parts[0] == "info" and len(parts) >= 2:
         team = mgr.get(parts[1])
@@ -31,7 +33,9 @@ async def handle_team(ui, args: str) -> None:
             return
         ui.println(f"Team {team.sanitized_name}\nconfig: {team.config_path}")
         for member in team.members:
-            ui.println(f"- {member.name} {member.agent_id} {member.backend_type} active={member.is_active} worktree={member.worktree_path}")
+            ui.println(
+                f"- {member.name} {member.agent_id} {member.backend_type} active={member.is_active} worktree={member.worktree_path}"
+            )
         return
     if parts[0] == "delete" and len(parts) >= 2:
         await mgr.delete(parts[1], "--force" in parts)
@@ -45,10 +49,14 @@ async def handle_team(ui, args: str) -> None:
                 continue
             from cowcode.team.backend import new_backend
 
-            await new_backend(member.backend_type, task_mgr=mgr.task_mgr).kill(member.pane_id, member.agent_id)
+            await new_backend(member.backend_type, task_mgr=mgr.task_mgr).kill(
+                member.pane_id, member.agent_id
+            )
             await mgr.remove_member(team, member.name)
             ui.println("member killed")
             return
         ui.error("member not found")
         return
-    ui.error("用法: /team list | /team info <name> | /team delete <name> [--force] | /team kill <member>")
+    ui.error(
+        "用法: /team list | /team info <name> | /team delete <name> [--force] | /team kill <member>"
+    )

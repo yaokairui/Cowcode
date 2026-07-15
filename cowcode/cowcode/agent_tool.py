@@ -89,7 +89,10 @@ class AgentTool:
                 "prompt": {"type": "string"},
                 "description": {"type": "string"},
                 "subagent_type": {"type": "string"},
-                "model": {"type": "string", "enum": ["", "haiku", "sonnet", "opus", "inherit"]},
+                "model": {
+                    "type": "string",
+                    "enum": ["", "haiku", "sonnet", "opus", "inherit"],
+                },
                 "run_in_background": {"type": "boolean"},
                 "name": {"type": "string"},
                 "team_name": {"type": "string"},
@@ -114,10 +117,14 @@ class AgentTool:
         if parsed.team_name:
             if self._team_hook is None:
                 return Result("team manager not configured", is_error=True)
-            team_name, member_name, in_process = self._team_hook.is_teammate_context(getattr(parent, "_ctx", {}))
+            team_name, member_name, in_process = self._team_hook.is_teammate_context(
+                getattr(parent, "_ctx", {})
+            )
             _ = (team_name, member_name)
             if in_process:
-                return Result("in-process teammate cannot spawn team members", is_error=True)
+                return Result(
+                    "in-process teammate cannot spawn team members", is_error=True
+                )
             try:
                 text = await self._team_hook.spawn_teammate(
                     TeamSpawnRequest(
@@ -143,11 +150,15 @@ class AgentTool:
         if parsed.subagent_type:
             definition = self._catalog.resolve(parsed.subagent_type)
             if definition is None:
-                return Result(f"未知 subagent_type: {parsed.subagent_type}", is_error=True)
+                return Result(
+                    f"未知 subagent_type: {parsed.subagent_type}", is_error=True
+                )
         else:
             definition = self._catalog.fork_definition()
 
-        background = definition.background or parsed.run_in_background or definition.is_fork()
+        background = (
+            definition.background or parsed.run_in_background or definition.is_fork()
+        )
         if definition.isolation == "worktree":
             background = False
         if background and not self._bg_enabled:
@@ -168,7 +179,10 @@ class AgentTool:
 
         if background:
             task_id = await self._task_manager.launch(
-                sub_agent, sub_session, parsed.name, "" if definition.is_fork() else parsed.prompt
+                sub_agent,
+                sub_session,
+                parsed.name,
+                "" if definition.is_fork() else parsed.prompt,
             )
             return Result(json.dumps({"task_id": task_id, "status": "async_launched"}))
 
@@ -182,10 +196,14 @@ class AgentTool:
                     await aggregator
                 return Result("worktree manager not configured", is_error=True)
             handle = asyncio.create_task(
-                execute_with_worktree(self.worktree_mgr, sub_agent, sub_session, parsed.prompt, events)
+                execute_with_worktree(
+                    self.worktree_mgr, sub_agent, sub_session, parsed.prompt, events
+                )
             )
         else:
-            handle = asyncio.create_task(sub_agent.run_to_completion(sub_session, parsed.prompt, events))  # type: ignore[attr-defined]
+            handle = asyncio.create_task(
+                sub_agent.run_to_completion(sub_session, parsed.prompt, events)
+            )  # type: ignore[attr-defined]
         try:
             final_text = await asyncio.wait_for(
                 asyncio.shield(handle), timeout=AUTO_BACKGROUND_SECONDS
@@ -198,7 +216,9 @@ class AgentTool:
             task_id = await self._task_manager.adopt_running(
                 sub_agent, sub_session, parsed.name, events, handle, partial
             )
-            return Result(json.dumps({"task_id": task_id, "status": "timed_out_to_background"}))
+            return Result(
+                json.dumps({"task_id": task_id, "status": "timed_out_to_background"})
+            )
         except Exception as exc:
             return Result(f"subagent error: {exc}", is_error=True)
         finally:
@@ -251,7 +271,9 @@ def _build_subagent(
     )
 
 
-def _build_sub_session(definition: Definition, parent_messages: list, prompt: str) -> Session:
+def _build_sub_session(
+    definition: Definition, parent_messages: list, prompt: str
+) -> Session:
     if definition.is_fork():
         return Session.from_messages(build_forked_messages(parent_messages, prompt))
     return Session()

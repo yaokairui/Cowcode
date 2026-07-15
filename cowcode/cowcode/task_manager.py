@@ -82,7 +82,9 @@ class Manager:
         task_id: str = "",
     ) -> str:
         task_id = task_id or self._next_id()
-        bt = BackgroundTask(id=task_id, name=name, sub_agent=agent, session=session, task=task_text)
+        bt = BackgroundTask(
+            id=task_id, name=name, sub_agent=agent, session=session, task=task_text
+        )
         async with self._lock:
             self._tasks[task_id] = bt
             if name:
@@ -171,7 +173,9 @@ class Manager:
 
         async def runner() -> None:
             try:
-                text = await bt.sub_agent.run_to_completion(bt.session, task_text, events)  # type: ignore[attr-defined]
+                text = await bt.sub_agent.run_to_completion(
+                    bt.session, task_text, events
+                )  # type: ignore[attr-defined]
                 bt.result = text
                 bt.status = Status.COMPLETED
             except asyncio.CancelledError:
@@ -193,7 +197,9 @@ class Manager:
 
         bt.handle = asyncio.create_task(runner())
 
-    async def _watch_existing(self, bt: BackgroundTask, events: asyncio.Queue, handle: asyncio.Task) -> None:
+    async def _watch_existing(
+        self, bt: BackgroundTask, events: asyncio.Queue, handle: asyncio.Task
+    ) -> None:
         aggregator = asyncio.create_task(self._aggregate_events(events, bt))
         try:
             result = await handle
@@ -212,7 +218,9 @@ class Manager:
             self._notify_done(bt.id)
             await self._run_done_callbacks(bt.id)
 
-    async def _aggregate_events(self, events: asyncio.Queue, bt: BackgroundTask) -> None:
+    async def _aggregate_events(
+        self, events: asyncio.Queue, bt: BackgroundTask
+    ) -> None:
         while True:
             event = await events.get()
             if event is None:
@@ -231,13 +239,19 @@ class Manager:
             try:
                 await callback(task_id)
             except Exception as exc:
-                print(f"task manager: done callback failed for {task_id}: {exc}", file=sys.stderr)
+                print(
+                    f"task manager: done callback failed for {task_id}: {exc}",
+                    file=sys.stderr,
+                )
 
     def _notify_done(self, task_id: str) -> None:
         try:
             self._done.put_nowait(task_id)
         except asyncio.QueueFull:
-            print(f"task manager: done queue full, dropping notification for {task_id}", file=sys.stderr)
+            print(
+                f"task manager: done queue full, dropping notification for {task_id}",
+                file=sys.stderr,
+            )
 
     @staticmethod
     def _next_id() -> str:

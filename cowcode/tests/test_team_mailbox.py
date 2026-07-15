@@ -12,7 +12,10 @@ from cowcode.team.mailbox import Box, Message
 @pytest.mark.asyncio
 async def test_mailbox_write_read_mark_read(tmp_path) -> None:
     box = Box(tmp_path)
-    await box.write("agent-1", Message(from_="lead", to="agent-1", summary="hi there", content="hello"))
+    await box.write(
+        "agent-1",
+        Message(from_="lead", to="agent-1", summary="hi there", content="hello"),
+    )
 
     messages = await box.read("agent-1")
     assert len(messages) == 1

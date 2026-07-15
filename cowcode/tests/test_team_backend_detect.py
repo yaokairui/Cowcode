@@ -21,5 +21,7 @@ def test_backend_detect_inprocess(monkeypatch) -> None:
 def test_backend_detect_iterm(monkeypatch) -> None:
     monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.setenv("TERM_PROGRAM", "iTerm.app")
-    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/it2" if name == "it2" else None)
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/bin/it2" if name == "it2" else None
+    )
     assert detect() == BackendType.ITERM2

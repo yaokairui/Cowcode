@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-import pytest
-
-from cowcode.coordinator import allowed_tools, env_truthy, is_enabled, system_prompt_suffix
+from cowcode.coordinator import (
+    allowed_tools,
+    env_truthy,
+    is_enabled,
+    system_prompt_suffix,
+)
 from cowcode.config import Config, FeaturesConfig, ProviderConfig
 
 

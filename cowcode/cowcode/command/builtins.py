@@ -43,7 +43,14 @@ def register_builtins(reg: Registry) -> None:
         Command("skill", "列出已加载的 Skill", Kind.LOCAL, handle_skill),
         Command("status", "显示当前运行状态", Kind.LOCAL, handle_status),
         Command("team", "管理 Agent Team", Kind.LOCAL, _noop, args_handler=handle_team),
-        Command("worktree", "管理 Git Worktree 隔离副本", Kind.LOCAL, _noop, args_handler=handle_worktree, hidden=True),
+        Command(
+            "worktree",
+            "管理 Git Worktree 隔离副本",
+            Kind.LOCAL,
+            _noop,
+            args_handler=handle_worktree,
+            hidden=True,
+        ),
     ]
     for cmd in commands:
         reg.register(cmd)

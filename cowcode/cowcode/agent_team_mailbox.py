@@ -33,7 +33,9 @@ async def ingest_team_mailbox(agent: Any, ctx: Any) -> str:
             if msg.payload.get("approve") is True:
                 if hasattr(agent, "set_permission_mode"):
                     agent.set_permission_mode(Mode.DEFAULT)
-                msg.content = (msg.content + "\nLead 已批准计划,权限模式已切到 default,可执行计划").strip()
+                msg.content = (
+                    msg.content + "\nLead 已批准计划,权限模式已切到 default,可执行计划"
+                ).strip()
             elif msg.payload.get("approve") is False:
                 msg.content = (
                     msg.content

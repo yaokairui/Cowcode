@@ -14,7 +14,9 @@ from cowcode.worktree.manager import Manager, Worktree
 from cowcode.worktree.slug import flat_slug, validate_slug
 
 
-async def create(self: Manager, name: str, base_ref: str = "HEAD", manual: bool = False) -> Worktree:
+async def create(
+    self: Manager, name: str, base_ref: str = "HEAD", manual: bool = False
+) -> Worktree:
     validate_slug(name)
     async with self.lock:
         if name in self.active:
@@ -39,12 +41,16 @@ async def create(self: Manager, name: str, base_ref: str = "HEAD", manual: bool 
             return wt
 
         try:
-            await _run_git(self.repo_root, "worktree", "add", "-B", branch, str(wt_path), base_ref)
+            await _run_git(
+                self.repo_root, "worktree", "add", "-B", branch, str(wt_path), base_ref
+            )
         except Exception:
             shutil.rmtree(wt_path, ignore_errors=True)
             raise
 
-        await _perform_post_creation_setup(Path(self.repo_root), wt_path, self.symlink_dirs)
+        await _perform_post_creation_setup(
+            Path(self.repo_root), wt_path, self.symlink_dirs
+        )
         head = await _run_git(wt_path, "rev-parse", "HEAD")
         wt = Worktree(
             name=name,
@@ -59,7 +65,9 @@ async def create(self: Manager, name: str, base_ref: str = "HEAD", manual: bool 
         return wt
 
 
-async def _perform_post_creation_setup(repo_root: Path, wt_path: Path, symlink_dirs: list[str]) -> None:
+async def _perform_post_creation_setup(
+    repo_root: Path, wt_path: Path, symlink_dirs: list[str]
+) -> None:
     steps = [
         ("configs", lambda: _copy_local_configs(repo_root, wt_path)),
         ("hooks", lambda: _setup_git_hooks(repo_root, wt_path)),
@@ -100,7 +108,9 @@ async def _setup_git_hooks(repo_root: Path, wt_path: Path) -> None:
         await _run_git(wt_path, "config", "core.hooksPath", hooks_path)
 
 
-def _symlink_large_dirs(repo_root: Path, wt_path: Path, symlink_dirs: list[str]) -> None:
+def _symlink_large_dirs(
+    repo_root: Path, wt_path: Path, symlink_dirs: list[str]
+) -> None:
     for rel in symlink_dirs:
         src = repo_root / rel
         dst = wt_path / rel
@@ -112,14 +122,26 @@ async def _copy_included_ignored(repo_root: Path, wt_path: Path) -> None:
     include = repo_root / ".worktreeinclude"
     if not include.exists():
         return
-    patterns = [line.strip() for line in include.read_text(encoding="utf-8").splitlines()]
+    patterns = [
+        line.strip() for line in include.read_text(encoding="utf-8").splitlines()
+    ]
     patterns = [p for p in patterns if p and not p.startswith("#")]
     if not patterns:
         return
-    listed = await _run_git(repo_root, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory")
+    listed = await _run_git(
+        repo_root,
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+    )
     for rel in listed.splitlines():
         rel = rel.rstrip("/")
-        if not rel or not any(fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(Path(rel).name, pat) for pat in patterns):
+        if not rel or not any(
+            fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(Path(rel).name, pat)
+            for pat in patterns
+        ):
             continue
         src = repo_root / rel
         dst = wt_path / rel

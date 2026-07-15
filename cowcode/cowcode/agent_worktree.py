@@ -34,7 +34,9 @@ async def execute_with_worktree(
     task_text = notice + "\n\n" + prompt
     try:
         with with_cwd(wt.path):
-            final_text = await sub_agent.run_to_completion(sub_session, task_text, events)
+            final_text = await sub_agent.run_to_completion(
+                sub_session, task_text, events
+            )
     finally:
         report = await manager.auto_cleanup(name)  # type: ignore[attr-defined]
     if report.kept:

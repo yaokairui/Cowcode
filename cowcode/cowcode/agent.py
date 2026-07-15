@@ -162,9 +162,8 @@ class Agent:
         max_turns: int = 0,
         permission_mode: Mode | None = None,
         dont_ask: bool = False,
-        approval_upgrader: Callable[
-            [ApprovalRequest], Awaitable[tuple[Outcome, bool]]
-        ] | None = None,
+        approval_upgrader: Callable[[ApprovalRequest], Awaitable[tuple[Outcome, bool]]]
+        | None = None,
         include_system_tools: bool = True,
         ctx: dict[str, Any] | None = None,
     ) -> None:
@@ -216,7 +215,9 @@ class Agent:
         if cancel is None:
             cancel = asyncio.Event()
         if mode_getter is None:
-            mode_getter = lambda: mode
+
+            def mode_getter() -> Mode:
+                return mode
 
         async with self._run_lock:
             unknown_run = 0
@@ -234,11 +235,12 @@ class Agent:
                     if self._permission_mode is not None
                     else mode_getter()
                 )
-                effective_mode_getter = lambda: (
-                    self._permission_mode
-                    if self._permission_mode is not None
-                    else mode_getter()
-                )
+
+                def effective_mode_getter() -> Mode:
+                    if self._permission_mode is not None:
+                        return self._permission_mode
+                    return mode_getter()
+
                 definitions = (
                     self._registry.read_only_definitions()
                     if current_mode == Mode.PLAN
@@ -256,7 +258,9 @@ class Agent:
                     reminder = plan_reminder(full)
                 team_reminder = await self._ingest_team_mailbox()
                 if team_reminder:
-                    reminder = f"{reminder}\n\n{team_reminder}" if reminder else team_reminder
+                    reminder = (
+                        f"{reminder}\n\n{team_reminder}" if reminder else team_reminder
+                    )
                 reminder = await self._build_reminder(reminder)
 
                 async with self._runtime.lock:
@@ -394,7 +398,10 @@ class Agent:
                         yield Event(text=final_text)
                     session.append("assistant", final_text)
                     self._maybe_update_memory(session)
-                    await self._dispatch_hook(HookEvent.STOP, {**self._base_payload(HookEvent.STOP), "iter": it})
+                    await self._dispatch_hook(
+                        HookEvent.STOP,
+                        {**self._base_payload(HookEvent.STOP), "iter": it},
+                    )
                     yield Event(done=True)
                     return
 
@@ -425,11 +432,15 @@ class Agent:
 
     # ---------- 内部 ----------
 
-    def _filter_team_tools(self, definitions: list[ToolDefinition]) -> list[ToolDefinition]:
+    def _filter_team_tools(
+        self, definitions: list[ToolDefinition]
+    ) -> list[ToolDefinition]:
         if self._allowed_tools:
             return definitions
         hidden = {"TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "SendMessage"}
-        return [definition for definition in definitions if definition.name not in hidden]
+        return [
+            definition for definition in definitions if definition.name not in hidden
+        ]
 
     async def _ingest_team_mailbox(self) -> str:
         from cowcode.agent_team_mailbox import ingest_team_mailbox
@@ -443,7 +454,9 @@ class Agent:
         extra = "\n\n".join(prompts)
         return f"{base}\n\n{extra}" if base else extra
 
-    async def _dispatch_hook(self, event: HookEvent, payload: Payload) -> DispatchResult:
+    async def _dispatch_hook(
+        self, event: HookEvent, payload: Payload
+    ) -> DispatchResult:
         engine = self._hook_engine
         if engine is None:
             return DispatchResult()

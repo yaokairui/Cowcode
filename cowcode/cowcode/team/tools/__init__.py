@@ -40,14 +40,25 @@ class TeamCreateTool:
     def parameters(self) -> dict:
         return {
             "type": "object",
-            "properties": {"team_name": {"type": "string"}, "description": {"type": "string"}},
+            "properties": {
+                "team_name": {"type": "string"},
+                "description": {"type": "string"},
+            },
             "required": ["team_name"],
         }
 
     async def execute(self, args: str) -> Result:
         data = parse_args(args)
-        team = await self._manager.create(str(data.get("team_name", "")), str(data.get("description", "") or ""))
-        return as_json({"team_name": team.sanitized_name, "backend": str(team.backend), "config_path": team.config_path})
+        team = await self._manager.create(
+            str(data.get("team_name", "")), str(data.get("description", "") or "")
+        )
+        return as_json(
+            {
+                "team_name": team.sanitized_name,
+                "backend": str(team.backend),
+                "config_path": team.config_path,
+            }
+        )
 
 
 class TeamDeleteTool:
@@ -71,13 +82,18 @@ class TeamDeleteTool:
     def parameters(self) -> dict:
         return {
             "type": "object",
-            "properties": {"team_name": {"type": "string"}, "force": {"type": "boolean"}},
+            "properties": {
+                "team_name": {"type": "string"},
+                "force": {"type": "boolean"},
+            },
             "required": ["team_name"],
         }
 
     async def execute(self, args: str) -> Result:
         data = parse_args(args)
-        await self._manager.delete(str(data.get("team_name", "")), bool(data.get("force", False)))
+        await self._manager.delete(
+            str(data.get("team_name", "")), bool(data.get("force", False))
+        )
         return as_json({"status": "deleted"})
 
 
@@ -100,11 +116,22 @@ class TeamTaskCreateTool:
         return "Create a shared team task."
 
     def parameters(self) -> dict:
-        return {"type": "object", "properties": {"title": {"type": "string"}, "description": {"type": "string"}, "assignee": {"type": "string"}, "blocked_by": {"type": "array", "items": {"type": "string"}}}, "required": ["title"]}
+        return {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "description": {"type": "string"},
+                "assignee": {"type": "string"},
+                "blocked_by": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["title"],
+        }
 
     async def execute(self, args: str) -> Result:
         data = parse_args(args)
-        team = team_from_ctx(self._manager, explicit=str(data.get("team_name", "") or ""))
+        team = team_from_ctx(
+            self._manager, explicit=str(data.get("team_name", "") or "")
+        )
         if team is None:
             return Result("team not found", is_error=True)
         store = Store(team.tasks_path)
@@ -131,11 +158,17 @@ class TeamTaskGetTool:
         return "Get a shared team task."
 
     def parameters(self) -> dict:
-        return {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}
+        return {
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}},
+            "required": ["task_id"],
+        }
 
     async def execute(self, args: str) -> Result:
         data = parse_args(args)
-        team = team_from_ctx(self._manager, explicit=str(data.get("team_name", "") or ""))
+        team = team_from_ctx(
+            self._manager, explicit=str(data.get("team_name", "") or "")
+        )
         if team is None:
             return Result("team not found", is_error=True)
         try:
@@ -168,10 +201,14 @@ class TeamTaskListTool:
 
     async def execute(self, args: str) -> Result:
         data = parse_args(args)
-        team = team_from_ctx(self._manager, explicit=str(data.get("team_name", "") or ""))
+        team = team_from_ctx(
+            self._manager, explicit=str(data.get("team_name", "") or "")
+        )
         if team is None:
             return Result("team not found", is_error=True)
-        tasks = await Store(team.tasks_path).list_(Filter(status_from_value(data.get("status"))))
+        tasks = await Store(team.tasks_path).list_(
+            Filter(status_from_value(data.get("status")))
+        )
         return as_json([task.to_dict(include_ready=True) for task in tasks])
 
 
@@ -194,14 +231,22 @@ class TeamTaskUpdateTool:
         return "Update a shared team task."
 
     def parameters(self) -> dict:
-        return {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}
+        return {
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}},
+            "required": ["task_id"],
+        }
 
     async def execute(self, args: str) -> Result:
         data = parse_args(args)
-        team = team_from_ctx(self._manager, explicit=str(data.get("team_name", "") or ""))
+        team = team_from_ctx(
+            self._manager, explicit=str(data.get("team_name", "") or "")
+        )
         if team is None:
             return Result("team not found", is_error=True)
-        await Store(team.tasks_path).update(str(data.get("task_id", "")), patch_from_args(data))
+        await Store(team.tasks_path).update(
+            str(data.get("task_id", "")), patch_from_args(data)
+        )
         return as_json({"status": "updated"})
 
 
@@ -224,11 +269,23 @@ class TeamSendMessageTool:
         return "Send a message to a teammate."
 
     def parameters(self) -> dict:
-        return {"type": "object", "properties": {"to": {"type": "string"}, "summary": {"type": "string"}, "message": {"type": "string"}, "type": {"type": "string"}, "payload": {"type": "object"}}, "required": ["to"]}
+        return {
+            "type": "object",
+            "properties": {
+                "to": {"type": "string"},
+                "summary": {"type": "string"},
+                "message": {"type": "string"},
+                "type": {"type": "string"},
+                "payload": {"type": "object"},
+            },
+            "required": ["to"],
+        }
 
     async def execute(self, args: str) -> Result:
         data = parse_args(args)
-        team = team_from_ctx(self._manager, explicit=str(data.get("team_name", "") or ""))
+        team = team_from_ctx(
+            self._manager, explicit=str(data.get("team_name", "") or "")
+        )
         if team is None:
             return Result("team not found", is_error=True)
         sender = str(data.get("from", "lead") or "lead")
@@ -245,18 +302,25 @@ class TeamSendMessageTool:
                 type=MessageType(str(data.get("type") or MessageType.TEXT)),
                 summary=str(data.get("summary", "") or "message"),
                 content=str(data.get("message", "") or data.get("content", "") or ""),
-                payload=data.get("payload") if isinstance(data.get("payload"), dict) else None,
+                payload=data.get("payload")
+                if isinstance(data.get("payload"), dict)
+                else None,
                 timestamp=now,
             )
             await box.write(member.agent_id, msg)
             backend = new_backend(member.backend_type, task_mgr=self._manager.task_mgr)
             await backend.wake(member.pane_id, member.agent_id)
-            if member.backend_type.value == "in-process" and self._manager.task_mgr is not None:
+            if (
+                member.backend_type.value == "in-process"
+                and self._manager.task_mgr is not None
+            ):
                 task = self._manager.task_mgr.get(member.agent_id)
                 if task is not None and task.status != BgStatus.RUNNING:
                     await self._manager.set_member_active(team, member.name, True)
                     try:
-                        await self._manager.task_mgr.send_message(member.name, msg.content)
+                        await self._manager.task_mgr.send_message(
+                            member.name, msg.content
+                        )
                     except (TaskBusy, TaskNotFound):
                         pass
             delivered.append(member.agent_id)

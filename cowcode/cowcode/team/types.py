@@ -77,7 +77,9 @@ class TeammateInfo:
             model=str(data.get("model", "") or ""),
             worktree_path=str(data.get("worktree_path", "") or ""),
             branch=str(data.get("branch", "") or ""),
-            backend_type=BackendType(str(data.get("backend_type") or BackendType.IN_PROCESS)),
+            backend_type=BackendType(
+                str(data.get("backend_type") or BackendType.IN_PROCESS)
+            ),
             pane_id=str(data.get("pane_id", "") or ""),
             is_active=data.get("is_active", None),
             plan_mode_required=bool(data.get("plan_mode_required", False)),
@@ -125,7 +127,11 @@ class Team:
             backend=BackendType(str(data.get("backend") or BackendType.IN_PROCESS)),
             description=str(data.get("description", "") or ""),
             created_at=created_at,
-            members=[TeammateInfo.from_dict(item) for item in data.get("members", []) if isinstance(item, dict)],
+            members=[
+                TeammateInfo.from_dict(item)
+                for item in data.get("members", [])
+                if isinstance(item, dict)
+            ],
         )
 
     async def add_member(self, info: TeammateInfo) -> None:
@@ -164,4 +170,6 @@ class Team:
         return next((member for member in self.members if member.name == name), None)
 
     def member_by_agent_id(self, agent_id: str) -> TeammateInfo | None:
-        return next((member for member in self.members if member.agent_id == agent_id), None)
+        return next(
+            (member for member in self.members if member.agent_id == agent_id), None
+        )

@@ -30,7 +30,12 @@ from cowcode.agent import (
     Phase,
 )
 from cowcode.command import Kind, Registry as CommandRegistry, parse, register_builtins
-from cowcode.command import SkillSummary, WorktreeAccessor, register_skills_as_commands, remove_skill_commands
+from cowcode.command import (
+    SkillSummary,
+    WorktreeAccessor,
+    register_skills_as_commands,
+    remove_skill_commands,
+)
 from cowcode.completion import CompletionMenu
 from cowcode.config import (
     Config,
@@ -1391,7 +1396,10 @@ class CowcodeApp(App[Any]):
         try:
             with with_cwd(self._effective_cwd()):
                 async for event in agent.run(
-                    self._session, mode, self._turn_cancel, mode_getter=lambda: self._mode
+                    self._session,
+                    mode,
+                    self._turn_cancel,
+                    mode_getter=lambda: self._mode,
                 ):
                     if event.err is not None:
                         self._print_error(str(event.err))
@@ -1425,7 +1433,9 @@ class CowcodeApp(App[Any]):
                             # PHASE_END：FIFO 弹出队首
                             if self._cur_tools:
                                 self._cur_tools.pop(0)
-                            self._print_tool_result(event.tool.result, event.tool.is_error)
+                            self._print_tool_result(
+                                event.tool.result, event.tool.is_error
+                            )
                             self._update_timer_display()
                     if event.usage is not None:
                         self._usage_in += event.usage.input_tokens
@@ -1468,7 +1478,9 @@ class CowcodeApp(App[Any]):
                             )
                         else:
                             self._conversation.write("")
-                            self._conversation.write(Text("Cowcode:", style="bold yellow"))
+                            self._conversation.write(
+                                Text("Cowcode:", style="bold yellow")
+                            )
                             self._conversation.write(
                                 Markdown(f"**❓ {event.ask_user.question}**")
                             )
@@ -1604,7 +1616,9 @@ async def _amain() -> int:
 
         from cowcode.team.tools import register_team_tools
 
-        team_manager = TeamManager(Path.home(), root, worktree_mgr, task_manager, name_reg)
+        team_manager = TeamManager(
+            Path.home(), root, worktree_mgr, task_manager, name_reg
+        )
         team_manager.catalog = subagent_catalog
         team_manager.registry_tools = registry
         register_team_tools(registry, team_manager)
@@ -1615,8 +1629,12 @@ async def _amain() -> int:
             subagent_catalog,
             task_manager,
             registry,
-            parent_getter=lambda: app_ref["app"]._ensure_agent() if "app" in app_ref else None,
-            messages_getter=lambda: app_ref["app"].all_messages() if "app" in app_ref else [],
+            parent_getter=lambda: (
+                app_ref["app"]._ensure_agent() if "app" in app_ref else None
+            ),
+            messages_getter=lambda: (
+                app_ref["app"].all_messages() if "app" in app_ref else []
+            ),
             bg_enabled=config.effective_enable_subagent_background(),
             worktree_mgr=worktree_mgr,
             team_hook=team_manager,

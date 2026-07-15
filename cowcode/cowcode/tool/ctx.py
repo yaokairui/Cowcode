@@ -7,7 +7,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from collections.abc import Iterator
 
-_ctx_cwd: contextvars.ContextVar[str | None] = contextvars.ContextVar("cwd", default=None)
+_ctx_cwd: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "cwd", default=None
+)
 
 
 @contextmanager
