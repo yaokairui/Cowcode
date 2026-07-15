@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from cowcode.permission import Mode
+import cowcode.run_to_completion  # noqa: F401  # 注册 Agent.run_to_completion
 from cowcode.session import Session
 from cowcode.skills.active import ActiveSkills
 from cowcode.skills.render import render_body
@@ -97,24 +96,7 @@ class Executor:
                 memory_manager=self.memory_manager,
                 allowed_tools=allowed_tools,
             )
-            final_text = ""
-            async for event in agent.run(fork_session, Mode.DEFAULT, asyncio.Event()):
-                if event.text:
-                    final_text += event.text
-                if event.usage is not None and self.runtime is not None:
-                    async with self.runtime.lock:
-                        self.runtime.usage_anchor += (
-                            event.usage.input_tokens + event.usage.output_tokens
-                        )
-                if event.err is not None:
-                    raise event.err
-                if event.done:
-                    break
-            if not final_text.strip():
-                messages = fork_session.get_history()
-                final_text = next(
-                    (m.content for m in reversed(messages) if m.role == "assistant"), ""
-                )
+            final_text = await agent.run_to_completion(fork_session, "")
             await ui.append_assistant_message(
                 final_text or "(skill produced no output)"
             )

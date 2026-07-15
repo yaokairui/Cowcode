@@ -63,10 +63,14 @@ class Config:
 
     providers: list[ProviderConfig] = field(default_factory=list)
     system_prompt: str = ""
+    enable_subagent_background: bool | None = None
 
     def __post_init__(self) -> None:
         if not self.providers:
             raise ConfigError("At least one provider must be configured")
+
+    def effective_enable_subagent_background(self) -> bool:
+        return True if self.enable_subagent_background is None else self.enable_subagent_background
 
 
 def effective_context_window(provider: ProviderConfig) -> int:
@@ -121,6 +125,7 @@ def load(path: str = "config.yaml") -> Config:
     return Config(
         providers=provider_configs,
         system_prompt=str(raw.get("system_prompt", "") or ""),
+        enable_subagent_background=_optional_bool(raw.get("enableSubAgentBackground")),
     )
 
 
@@ -134,6 +139,12 @@ def _resolve_config_path(path: str) -> Path:
         return packaged_config
 
     raise ConfigError(f"Config file not found: {path}")
+
+
+def _optional_bool(value: object) -> bool | None:
+    if value is None:
+        return None
+    return bool(value)
 
 
 def _provider_from_dict(raw: dict[str, Any], provider_number: int) -> ProviderConfig:

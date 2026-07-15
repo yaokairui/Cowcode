@@ -6,7 +6,7 @@ import asyncio
 import json as _json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AsyncIterator, Callable
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from cowcode.compact import (
     AutoCompactTrackingState,
@@ -159,6 +159,13 @@ class Agent:
         memory_manager: MemoryManager | None = None,
         allowed_tools: list[str] | None = None,
         hook_engine: object | None = None,
+        max_turns: int = 0,
+        permission_mode: Mode | None = None,
+        dont_ask: bool = False,
+        approval_upgrader: Callable[
+            [ApprovalRequest], Awaitable[tuple[Outcome, bool]]
+        ] | None = None,
+        include_system_tools: bool = True,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -178,6 +185,11 @@ class Agent:
         if hook_engine is not None:
             self._runtime.hook_engine = hook_engine
         self._allowed_tools = list(allowed_tools or [])
+        self._max_turns = max_turns
+        self._permission_mode = permission_mode
+        self._dont_ask = dont_ask
+        self._approval_upgrader = approval_upgrader
+        self._include_system_tools = include_system_tools
         self._run_lock = asyncio.Lock()
 
     async def run(
@@ -196,14 +208,24 @@ class Agent:
         async with self._run_lock:
             unknown_run = 0
 
-            for it in range(1, MAX_ITERATIONS + 1):
+            max_iterations = self._max_turns or MAX_ITERATIONS
+            for it in range(1, max_iterations + 1):
                 yield Event(iter=it)
 
                 if cancel.is_set():
                     await self._finish_cancelled(session)
                     return
 
-                current_mode = mode_getter()
+                current_mode = (
+                    self._permission_mode
+                    if self._permission_mode is not None
+                    else mode_getter()
+                )
+                effective_mode_getter = lambda: (
+                    self._permission_mode
+                    if self._permission_mode is not None
+                    else mode_getter()
+                )
                 definitions = (
                     self._registry.read_only_definitions()
                     if current_mode == Mode.PLAN
@@ -211,7 +233,8 @@ class Agent:
                 )
                 if self._allowed_tools:
                     definitions = self._registry.definitions_filtered(
-                        self._allowed_tools
+                        self._allowed_tools,
+                        include_system=self._include_system_tools,
                     )
                 reminder = ""
                 if current_mode == Mode.PLAN:
@@ -363,7 +386,7 @@ class Agent:
 
                 execution_state = _ExecutionState()
                 async for event in self._execute_batched(
-                    calls, mode_getter, cancel, execution_state
+                    calls, effective_mode_getter, cancel, execution_state
                 ):
                     yield event
                 session.add_tool_results(execution_state.results)
@@ -687,35 +710,64 @@ class Agent:
                             phase=Phase.START,
                         )
                     )
-                    respond: asyncio.Future[Outcome] = asyncio.Future()
-                    yield Event(
-                        approval=ApprovalRequest(
+                    if self._dont_ask:
+                        outcome = Outcome.ALLOW_ONCE
+                    else:
+                        respond: asyncio.Future[Outcome] = asyncio.Future()
+                        req = ApprovalRequest(
                             name=call.name,
                             args=self._args_preview(call.input or "{}"),
                             reason=reason,
                             respond=respond,
                         )
-                    )
-                    try:
-                        outcome = await respond
-                    except asyncio.CancelledError:
-                        results[i] = ToolResult(
-                            tool_call_id=call.id,
-                            content=NOTICE_CANCELLED,
-                            is_error=True,
-                        )
-                        yield Event(
-                            tool=ToolEvent(
-                                name=call.name,
-                                args=self._args_preview(call.input or "{}"),
-                                phase=Phase.END,
-                                result=results[i].content,
-                                is_error=True,
-                            )
-                        )
-                        state.results = self._coalesce_results(results)
-                        state.completed = False
-                        return
+                        if self._approval_upgrader is not None:
+                            upgraded, ok = await self._approval_upgrader(req)
+                            if ok:
+                                outcome = upgraded
+                            else:
+                                yield Event(approval=req)
+                                try:
+                                    outcome = await respond
+                                except asyncio.CancelledError:
+                                    results[i] = ToolResult(
+                                        tool_call_id=call.id,
+                                        content=NOTICE_CANCELLED,
+                                        is_error=True,
+                                    )
+                                    yield Event(
+                                        tool=ToolEvent(
+                                            name=call.name,
+                                            args=self._args_preview(call.input or "{}"),
+                                            phase=Phase.END,
+                                            result=results[i].content,
+                                            is_error=True,
+                                        )
+                                    )
+                                    state.results = self._coalesce_results(results)
+                                    state.completed = False
+                                    return
+                        else:
+                            yield Event(approval=req)
+                            try:
+                                outcome = await respond
+                            except asyncio.CancelledError:
+                                results[i] = ToolResult(
+                                    tool_call_id=call.id,
+                                    content=NOTICE_CANCELLED,
+                                    is_error=True,
+                                )
+                                yield Event(
+                                    tool=ToolEvent(
+                                        name=call.name,
+                                        args=self._args_preview(call.input or "{}"),
+                                        phase=Phase.END,
+                                        result=results[i].content,
+                                        is_error=True,
+                                    )
+                                )
+                                state.results = self._coalesce_results(results)
+                                state.completed = False
+                                return
 
                     if outcome == Outcome.DENY_ONCE:
                         results[i] = ToolResult(
@@ -744,21 +796,19 @@ class Agent:
                             pass  # 写规则失败不阻断执行
 
                 # 执行（ALLOW / ALLOW_ONCE / ALLOW_FOREVER）
-                yield Event(
-                    tool=ToolEvent(
-                        name=call.name,
-                        args=self._args_preview(call.input or "{}"),
-                        phase=Phase.START if decision != Decision.ASK else Phase.END,
+                if decision != Decision.ASK:
+                    yield Event(
+                        tool=ToolEvent(
+                            name=call.name,
+                            args=self._args_preview(call.input or "{}"),
+                            phase=Phase.START,
+                        )
                     )
-                )
                 if cancel.is_set():
                     self._fill_cancelled_results(calls, results, i)
                     state.results = self._coalesce_results(results)
                     state.completed = False
                     return
-                if decision != Decision.ASK:
-                    # START 还没发 — 补发
-                    pass  # START 已在上方发出
                 results[i] = await self._run_one(call)
                 await self._record_read_file(call, results[i])
                 await self._post_tool_hook(call, results[i])

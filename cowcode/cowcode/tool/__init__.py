@@ -73,6 +73,9 @@ class Registry:
     def count(self) -> int:
         return len(self._tools)
 
+    def names(self) -> list[str]:
+        return list(self._order)
+
     def definitions(self) -> list[ToolDefinition]:
         return [self._definition(name) for name in self._order]
 
@@ -84,12 +87,14 @@ class Registry:
             if self._tools[name].read_only is True
         ]
 
-    def definitions_filtered(self, allowed: list[str]) -> list[ToolDefinition]:
+    def definitions_filtered(
+        self, allowed: list[str], include_system: bool = True
+    ) -> list[ToolDefinition]:
         allowed_set = set(allowed)
         return [
             self._definition(name)
             for name in self._order
-            if name in allowed_set or self._is_system_tool(name)
+            if name in allowed_set or (include_system and self._is_system_tool(name))
         ]
 
     def is_read_only(self, name: str) -> bool:

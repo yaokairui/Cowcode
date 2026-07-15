@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
 from dataclasses import dataclass
 from dataclasses import replace
@@ -39,6 +40,7 @@ from cowcode.config import (
     load_configs,
     resolve_config_path,
 )
+from cowcode.agent_tool import AgentTool
 from cowcode.environment import gather_environment
 from cowcode import hook, mcp as mcp_client
 from cowcode.hook import Event as HookEvent
@@ -48,7 +50,8 @@ from cowcode.prompt import build_system_prompt
 from cowcode.prompt import SkillCatalogItem, render_skills_catalog
 from cowcode.provider import Provider, create_provider
 from cowcode.runtime import SessionRuntime
-from cowcode.skills import Catalog, Executor
+from cowcode.skills import Catalog
+from cowcode.skills.executor import Executor
 from cowcode.tool.install_skill import InstallSkillTool
 from cowcode.tool.load_skill import LoadSkillTool
 from cowcode.session import (
@@ -64,6 +67,10 @@ from cowcode.session import (
 from cowcode.instructions import Loader as InstructionsLoader
 from cowcode.memory import Manager as MemoryManager
 from cowcode.tool import Registry, new_default_registry, truncate_text
+from cowcode.subagent import load_catalog as load_subagent_catalog
+from cowcode.task_manager import Manager as TaskManager
+from cowcode.task_notice import consume_task_done
+from cowcode.task_tools import SendMessageTool, TaskGetTool, TaskListTool, TaskStopTool
 from cowcode.compact import (
     AutoCompactTrackingState,
     ContentReplacementState,
@@ -395,6 +402,8 @@ class CowcodeApp(App[Any]):
         catalog: Catalog | None = None,
         skill_executor: Executor | None = None,
         hook_engine: object | None = None,
+        task_manager: TaskManager | None = None,
+        agent_tool: AgentTool | None = None,
     ) -> None:
         super().__init__()
         self._providers = providers
@@ -422,6 +431,8 @@ class CowcodeApp(App[Any]):
         self._catalog = catalog or Catalog()
         self._skill_executor = skill_executor
         self.hook_engine = hook_engine
+        self.task_manager = task_manager or TaskManager()
+        self._agent_tool = agent_tool
         self._runtime.hook_engine = hook_engine
         self._session: Session | None = None
         self._full_response = ""
@@ -494,6 +505,7 @@ class CowcodeApp(App[Any]):
         )
         self._conversation.write(Text("Ready. Send a message to begin.", style="green"))
         self.run_worker(self._dispatch_session_start())
+        self.run_worker(consume_task_done(self))
 
         if len(self._providers) == 1:
             self._select_provider(self._providers[0])
@@ -670,6 +682,9 @@ class CowcodeApp(App[Any]):
                 memory_manager=self._memory_manager,
                 hook_engine=self.hook_engine,
             )
+            if self._agent_tool is not None:
+                # AgentTool 通过 getter 拿 parent；这里保留触发点，便于未来显式回填。
+                pass
         return self._agent
 
     def _environment_changed(self, environment: str) -> bool:
@@ -1305,7 +1320,6 @@ class CowcodeApp(App[Any]):
             outcome = Outcome.ALLOW_ONCE
         if not pending.respond.done():
             pending.respond.set_result(outcome)
-        self._start_agent_run(self._ask_user_mode)
 
     def _start_agent_run(self, mode: Mode) -> None:
         """启动 Agent Loop 并消费事件流。"""
@@ -1397,7 +1411,6 @@ class CowcodeApp(App[Any]):
                         ),
                         callback=self._on_approval_answer,
                     )
-                    break
                 if event.ask_user is not None:
                     # 弹窗让用户选择或自定义输入
                     self._pending_question = event.ask_user
@@ -1440,6 +1453,9 @@ class CowcodeApp(App[Any]):
 
 async def _amain() -> int:
     """异步装配 Cowcode 与 MCP 生命周期。"""
+    if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
+        print("Cowcode - terminal AI coding assistant\n\nUsage: cowcode [--help]")
+        return 0
     try:
         config, providers = load_configs()
     except FileNotFoundError:
@@ -1448,8 +1464,6 @@ async def _amain() -> int:
     except ConfigError as exc:
         print(f"Error: Invalid config: {exc}")
         return 1
-
-    import sys
 
     root = str(resolve_config_path().parent.resolve())
     instruction_text = InstructionsLoader(root).load()
@@ -1478,6 +1492,12 @@ async def _amain() -> int:
             registry.register(remote_tool)
 
         catalog = Catalog.load(Path(root))
+        subagent_catalog = load_subagent_catalog(root)
+        task_manager = TaskManager()
+        registry.register(TaskListTool(task_manager))
+        registry.register(TaskGetTool(task_manager))
+        registry.register(TaskStopTool(task_manager))
+        registry.register(SendMessageTool(task_manager))
         hook_engine = hook.load(root)
         runtime = SessionRuntime(
             replacement=ContentReplacementState(),
@@ -1520,6 +1540,16 @@ async def _amain() -> int:
             engine=engine,
             memory_manager=mem_mgr,
         )
+        app_ref: dict[str, CowcodeApp] = {}
+        agent_tool = AgentTool(
+            subagent_catalog,
+            task_manager,
+            registry,
+            parent_getter=lambda: app_ref["app"]._ensure_agent() if "app" in app_ref else None,
+            messages_getter=lambda: app_ref["app"].all_messages() if "app" in app_ref else [],
+            bg_enabled=config.effective_enable_subagent_background(),
+        )
+        registry.register(agent_tool)
         app = CowcodeApp(
             providers=providers,
             config=config,
@@ -1534,7 +1564,10 @@ async def _amain() -> int:
             catalog=catalog,
             skill_executor=skill_executor,
             hook_engine=hook_engine,
+            task_manager=task_manager,
+            agent_tool=agent_tool,
         )
+        app_ref["app"] = app
         await app.run_async()
         if hook_engine is not None:
             await hook_engine.dispatch(
